@@ -1907,6 +1907,13 @@ fn dedup_absolute_paths(paths: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
     deduped
 }
 
+/// Returns implicit readable roots for runtime-managed helper executables that
+/// must stay usable under restricted filesystem policies without requiring
+/// explicit user permission-profile entries.
+///
+/// When the execve wrapper lives under `$CODEX_HOME/tmp/arg0`, we allowlist the
+/// shared arg0 temp root instead of a single session-specific wrapper path so
+/// future helper paths created in that tree remain readable too.
 fn helper_readable_roots(
     codex_home: &Path,
     zsh_path: Option<&PathBuf>,
@@ -2670,25 +2677,25 @@ impl Config {
             main_execve_wrapper_exe.as_ref(),
         );
         let effective_sandbox_policy = constrained_sandbox_policy.value.get().clone();
-        let effective_sandbox_matches_original =
-            effective_sandbox_policy == original_sandbox_policy;
-        let mut effective_file_system_sandbox_policy = if effective_sandbox_matches_original {
-            file_system_sandbox_policy
-        } else {
-            FileSystemSandboxPolicy::from_legacy_sandbox_policy(
-                &effective_sandbox_policy,
-                &resolved_cwd,
-            )
-        };
+        let mut effective_file_system_sandbox_policy =
+            if effective_sandbox_policy == original_sandbox_policy {
+                file_system_sandbox_policy
+            } else {
+                FileSystemSandboxPolicy::from_legacy_sandbox_policy(
+                    &effective_sandbox_policy,
+                    &resolved_cwd,
+                )
+            };
         add_additional_file_system_reads(
             &mut effective_file_system_sandbox_policy,
             &helper_readable_roots,
         );
-        let effective_network_sandbox_policy = if effective_sandbox_matches_original {
-            network_sandbox_policy
-        } else {
-            NetworkSandboxPolicy::from(&effective_sandbox_policy)
-        };
+        let effective_network_sandbox_policy =
+            if effective_sandbox_policy == original_sandbox_policy {
+                network_sandbox_policy
+            } else {
+                NetworkSandboxPolicy::from(&effective_sandbox_policy)
+            };
 
         let config = Self {
             model,
