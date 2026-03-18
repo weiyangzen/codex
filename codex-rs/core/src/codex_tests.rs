@@ -4365,8 +4365,12 @@ async fn tool_call_metadata_stamps_escalated_review_decision_when_feature_enable
     .await;
     while rx.try_recv().is_ok() {}
 
-    sess.record_approval_outcome("call-1", &ReviewDecision::Denied)
-        .await;
+    sess.record_direct_approval_outcome(
+        "call-1",
+        &ReviewDecision::Denied,
+        codex_protocol::models::ApprovalSourceMetadata::User,
+    )
+    .await;
     sess.record_response_item_and_emit_turn_item(
         tc.as_ref(),
         ResponseItem::FunctionCall {
@@ -4454,6 +4458,71 @@ async fn tool_call_metadata_stamps_non_escalated_false_when_feature_enabled() {
                 } if metadata.is_tool_call_escalated == Some(false)
                     && metadata.review_decision.is_none()
                     && metadata.approval_source.is_none()
+                    && metadata.sandbox_policy == Some(expected_sandbox_policy)
+            )
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_call_metadata_stamps_guardian_direct_review_when_feature_enabled() {
+    let (mut sess, tc, rx) = make_session_and_context_with_rx().await;
+    let expected_sandbox_policy = sandbox_policy_to_metadata(tc.sandbox_policy.get());
+    Arc::get_mut(&mut sess)
+        .expect("session should be uniquely owned in this test")
+        .features
+        .enable(crate::features::Feature::ItemMetadata)
+        .expect("feature flag should be enabled for this test");
+
+    sess.spawn_task(
+        Arc::clone(&tc),
+        vec![UserInput::Text {
+            text: "start".to_string(),
+            text_elements: Vec::new(),
+        }],
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: false,
+        },
+    )
+    .await;
+    while rx.try_recv().is_ok() {}
+
+    sess.record_direct_approval_outcome(
+        "call-guardian-runtime-1",
+        &ReviewDecision::Denied,
+        codex_protocol::models::ApprovalSourceMetadata::Guardian,
+    )
+    .await;
+    sess.record_response_item_and_emit_turn_item(
+        tc.as_ref(),
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "shell".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: "call-guardian-runtime-1".to_string(),
+            metadata: None,
+        },
+    )
+    .await;
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("expected raw response item event")
+        .expect("channel open");
+    assert!(matches!(
+        event.msg,
+        EventMsg::RawResponseItem(ref ev)
+            if matches!(
+                &ev.item,
+                ResponseItem::FunctionCall {
+                    metadata: Some(metadata),
+                    ..
+                } if metadata.is_tool_call_escalated == Some(true)
+                    && metadata.review_decision
+                        == Some(codex_protocol::models::ReviewDecisionMetadata::Denied)
+                    && metadata.approval_source
+                        == Some(codex_protocol::models::ApprovalSourceMetadata::Guardian)
                     && metadata.sandbox_policy == Some(expected_sandbox_policy)
             )
     ));
@@ -4612,8 +4681,12 @@ async fn tool_call_metadata_can_be_restamped_after_approval_outcome() {
         },
     )
     .await;
-    sess.record_approval_outcome("call-restamp-1", &ReviewDecision::Denied)
-        .await;
+    sess.record_direct_approval_outcome(
+        "call-restamp-1",
+        &ReviewDecision::Denied,
+        codex_protocol::models::ApprovalSourceMetadata::User,
+    )
+    .await;
 
     let original_item = sess
         .clone_history()
