@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use codex_protocol::dynamic_tools::DynamicToolResponse;
+use codex_protocol::models::ApprovalSourceMetadata;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItemMetadata;
 use codex_protocol::models::ReviewDecisionMetadata;
@@ -65,6 +66,18 @@ pub(crate) struct PendingInputItem {
     pub(crate) metadata: Option<ResponseItemMetadata>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingApprovalMetadata {
+    pub(crate) call_id: String,
+    pub(crate) approval_source: ApprovalSourceMetadata,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ApprovalOutcomeMetadata {
+    pub(crate) review_decision: Option<ReviewDecisionMetadata>,
+    pub(crate) approval_source: ApprovalSourceMetadata,
+}
+
 impl ActiveTurn {
     pub(crate) fn add_task(&mut self, task: RunningTask) {
         let sub_id = task.turn_context.sub_id.clone();
@@ -85,8 +98,8 @@ impl ActiveTurn {
 #[derive(Default)]
 pub(crate) struct TurnState {
     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
-    pending_approval_call_ids: HashMap<String, String>,
-    approval_outcomes_by_call_id: HashMap<String, ReviewDecisionMetadata>,
+    pending_approval_metadata_by_id: HashMap<String, PendingApprovalMetadata>,
+    approval_outcomes_by_call_id: HashMap<String, ApprovalOutcomeMetadata>,
     pending_request_permissions: HashMap<String, oneshot::Sender<RequestPermissionsResponse>>,
     pending_user_input: HashMap<String, oneshot::Sender<RequestUserInputResponse>>,
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
@@ -109,29 +122,36 @@ impl TurnState {
     pub(crate) fn insert_pending_approval_call_id(
         &mut self,
         approval_key: String,
-        call_id: String,
-    ) -> Option<String> {
-        self.pending_approval_call_ids.insert(approval_key, call_id)
+        pending_metadata: PendingApprovalMetadata,
+    ) -> Option<PendingApprovalMetadata> {
+        self.pending_approval_metadata_by_id
+            .insert(approval_key, pending_metadata)
     }
 
-    pub(crate) fn remove_pending_approval_call_id(&mut self, approval_key: &str) -> Option<String> {
-        self.pending_approval_call_ids.remove(approval_key)
+    pub(crate) fn remove_pending_approval_call_id(
+        &mut self,
+        approval_key: &str,
+    ) -> Option<PendingApprovalMetadata> {
+        self.pending_approval_metadata_by_id.remove(approval_key)
     }
 
     pub(crate) fn record_approval_outcome(
         &mut self,
         call_id: String,
-        decision: ReviewDecisionMetadata,
+        outcome: ApprovalOutcomeMetadata,
     ) {
-        self.approval_outcomes_by_call_id.insert(call_id, decision);
+        self.approval_outcomes_by_call_id.insert(call_id, outcome);
     }
 
     pub(crate) fn approval_metadata_snapshot(
         &self,
-    ) -> (HashMap<String, ReviewDecisionMetadata>, HashSet<String>) {
+    ) -> (HashMap<String, ApprovalOutcomeMetadata>, HashSet<String>) {
         (
             self.approval_outcomes_by_call_id.clone(),
-            self.pending_approval_call_ids.values().cloned().collect(),
+            self.pending_approval_metadata_by_id
+                .values()
+                .map(|metadata| metadata.call_id.clone())
+                .collect(),
         )
     }
 
@@ -144,7 +164,7 @@ impl TurnState {
 
     pub(crate) fn clear_pending(&mut self) {
         self.pending_approvals.clear();
-        self.pending_approval_call_ids.clear();
+        self.pending_approval_metadata_by_id.clear();
         self.approval_outcomes_by_call_id.clear();
         self.pending_request_permissions.clear();
         self.pending_user_input.clear();

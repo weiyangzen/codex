@@ -87,6 +87,7 @@ use codex_protocol::items::PlanItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::mcp::CallToolResult;
+use codex_protocol::models::ApprovalSourceMetadata;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::UserMessageType;
@@ -206,6 +207,7 @@ use crate::file_watcher::FileWatcher;
 use crate::file_watcher::FileWatcherEvent;
 use crate::git_info::get_git_repo_root;
 use crate::guardian::GuardianReviewSessionManager;
+use crate::guardian::routes_approval_to_guardian;
 use crate::instructions::UserInstructions;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::McpManager;
@@ -283,6 +285,8 @@ use crate::skills::injection::app_id_from_path;
 use crate::skills::injection::tool_kind_for_path;
 use crate::skills::resolve_skill_dependencies_for_turn;
 use crate::state::ActiveTurn;
+use crate::state::ApprovalOutcomeMetadata;
+use crate::state::PendingApprovalMetadata;
 use crate::state::SessionServices;
 use crate::state::SessionState;
 use crate::state_db;
@@ -1083,6 +1087,14 @@ fn review_decision_to_metadata(decision: &ReviewDecision) -> ReviewDecisionMetad
     }
 }
 
+fn approval_source_for_turn(turn_context: &TurnContext) -> ApprovalSourceMetadata {
+    if routes_approval_to_guardian(turn_context) {
+        ApprovalSourceMetadata::Guardian
+    } else {
+        ApprovalSourceMetadata::User
+    }
+}
+
 fn response_item_tool_call_id(item: &ResponseItem) -> Option<&str> {
     match item {
         ResponseItem::LocalShellCall {
@@ -1135,7 +1147,7 @@ fn tool_call_metadata_or_default(item: &ResponseItem) -> Option<ResponseItemMeta
 
 #[derive(Clone, Debug, Default)]
 struct ToolApprovalMetadataSnapshot {
-    approval_outcomes_by_call_id: HashMap<String, ReviewDecisionMetadata>,
+    approval_outcomes_by_call_id: HashMap<String, ApprovalOutcomeMetadata>,
     pending_approval_call_ids: HashSet<String>,
 }
 
@@ -1163,13 +1175,15 @@ fn stamp_tool_approval_metadata_with_snapshot(
     ));
 
     match outcome {
-        Some(review_decision) => {
+        Some(outcome) => {
             metadata.is_tool_call_escalated = Some(true);
-            metadata.review_decision = Some(review_decision);
+            metadata.review_decision = outcome.review_decision;
+            metadata.approval_source = Some(outcome.approval_source);
         }
         None if !has_pending_approval => {
             metadata.is_tool_call_escalated = Some(false);
             metadata.review_decision = None;
+            metadata.approval_source = None;
         }
         None => {
             return stamp_tool_metadata_on_response_item(response_item, metadata);
@@ -3067,7 +3081,10 @@ impl Session {
                     let mut ts = at.turn_state.lock().await;
                     ts.insert_pending_approval_call_id(
                         effective_approval_id.clone(),
-                        call_id.clone(),
+                        PendingApprovalMetadata {
+                            call_id: call_id.clone(),
+                            approval_source: approval_source_for_turn(turn_context),
+                        },
                     );
                     ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
                 }
@@ -3134,7 +3151,13 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval_call_id(approval_id.clone(), call_id.clone());
+                    ts.insert_pending_approval_call_id(
+                        approval_id.clone(),
+                        PendingApprovalMetadata {
+                            call_id: call_id.clone(),
+                            approval_source: approval_source_for_turn(turn_context),
+                        },
+                    );
                     ts.insert_pending_approval(approval_id.clone(), tx_approve)
                 }
                 None => None,
@@ -3426,13 +3449,50 @@ impl Session {
             return;
         };
         let mut ts = at.turn_state.lock().await;
-        let call_id = ts
+        let pending_approval = ts
             .remove_pending_approval_call_id(approval_id)
-            .unwrap_or_else(|| approval_id.to_string());
+            .unwrap_or_else(|| PendingApprovalMetadata {
+                call_id: approval_id.to_string(),
+                approval_source: ApprovalSourceMetadata::Unknown,
+            });
+        drop(ts);
+        drop(active);
+        self.record_call_approval_outcome(
+            pending_approval.call_id,
+            ApprovalOutcomeMetadata {
+                review_decision: Some(review_decision_to_metadata(decision)),
+                approval_source: pending_approval.approval_source,
+            },
+        )
+        .await;
+    }
+
+    pub async fn record_policy_outcome(&self, call_id: &str) {
+        self.record_call_approval_outcome(
+            call_id.to_string(),
+            ApprovalOutcomeMetadata {
+                review_decision: None,
+                approval_source: ApprovalSourceMetadata::Policy,
+            },
+        )
+        .await;
+    }
+
+    async fn record_call_approval_outcome(
+        &self,
+        call_id: String,
+        outcome: ApprovalOutcomeMetadata,
+    ) {
+        let mut active = self.active_turn.lock().await;
+        let Some(at) = active.as_mut() else {
+            return;
+        };
         if !self.enabled(Feature::ItemMetadata) {
             return;
         }
-        ts.record_approval_outcome(call_id, review_decision_to_metadata(decision));
+
+        let mut ts = at.turn_state.lock().await;
+        ts.record_approval_outcome(call_id, outcome);
     }
 
     pub async fn notify_approval(&self, approval_id: &str, decision: ReviewDecision) {
