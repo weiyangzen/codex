@@ -1897,6 +1897,68 @@ fn add_additional_file_system_writes(
     }
 }
 
+fn dedup_absolute_paths(paths: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
+    let mut deduped = Vec::new();
+    for path in paths {
+        if !deduped.contains(&path) {
+            deduped.push(path);
+        }
+    }
+    deduped
+}
+
+fn helper_readable_roots(
+    codex_home: &Path,
+    zsh_path: Option<&PathBuf>,
+    main_execve_wrapper_exe: Option<&PathBuf>,
+) -> Vec<AbsolutePathBuf> {
+    let arg0_root = AbsolutePathBuf::from_absolute_path(codex_home.join("tmp").join("arg0")).ok();
+    let zsh_path = zsh_path.and_then(|path| AbsolutePathBuf::from_absolute_path(path).ok());
+    let execve_wrapper_root = main_execve_wrapper_exe.and_then(|path| {
+        let path = AbsolutePathBuf::from_absolute_path(path).ok()?;
+        if let Some(arg0_root) = arg0_root.as_ref()
+            && path.as_path().starts_with(arg0_root.as_path())
+        {
+            return Some(arg0_root.clone());
+        }
+        Some(path)
+    });
+
+    dedup_absolute_paths(
+        zsh_path
+            .into_iter()
+            .chain(execve_wrapper_root)
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn add_additional_file_system_reads(
+    file_system_sandbox_policy: &mut FileSystemSandboxPolicy,
+    additional_readable_roots: &[AbsolutePathBuf],
+) {
+    if file_system_sandbox_policy.has_full_disk_read_access() {
+        return;
+    }
+
+    for path in additional_readable_roots {
+        let exists = file_system_sandbox_policy.entries.iter().any(|entry| {
+            matches!(
+                &entry.path,
+                codex_protocol::permissions::FileSystemPath::Path { path: existing }
+                    if existing == path && entry.access == codex_protocol::permissions::FileSystemAccessMode::Read
+            )
+        });
+        if !exists {
+            file_system_sandbox_policy.entries.push(
+                codex_protocol::permissions::FileSystemSandboxEntry {
+                    path: codex_protocol::permissions::FileSystemPath::Path { path: path.clone() },
+                    access: codex_protocol::permissions::FileSystemAccessMode::Read,
+                },
+            );
+        }
+    }
+}
+
 /// Optional overrides for user configuration (e.g., from CLI flags).
 #[derive(Default, Debug, Clone)]
 pub struct ConfigOverrides {
@@ -2602,22 +2664,31 @@ impl Config {
         } else {
             network.enabled().then_some(network)
         };
+        let helper_readable_roots = helper_readable_roots(
+            &codex_home,
+            zsh_path.as_ref(),
+            main_execve_wrapper_exe.as_ref(),
+        );
         let effective_sandbox_policy = constrained_sandbox_policy.value.get().clone();
-        let effective_file_system_sandbox_policy =
-            if effective_sandbox_policy == original_sandbox_policy {
-                file_system_sandbox_policy
-            } else {
-                FileSystemSandboxPolicy::from_legacy_sandbox_policy(
-                    &effective_sandbox_policy,
-                    &resolved_cwd,
-                )
-            };
-        let effective_network_sandbox_policy =
-            if effective_sandbox_policy == original_sandbox_policy {
-                network_sandbox_policy
-            } else {
-                NetworkSandboxPolicy::from(&effective_sandbox_policy)
-            };
+        let effective_sandbox_matches_original =
+            effective_sandbox_policy == original_sandbox_policy;
+        let mut effective_file_system_sandbox_policy = if effective_sandbox_matches_original {
+            file_system_sandbox_policy
+        } else {
+            FileSystemSandboxPolicy::from_legacy_sandbox_policy(
+                &effective_sandbox_policy,
+                &resolved_cwd,
+            )
+        };
+        add_additional_file_system_reads(
+            &mut effective_file_system_sandbox_policy,
+            &helper_readable_roots,
+        );
+        let effective_network_sandbox_policy = if effective_sandbox_matches_original {
+            network_sandbox_policy
+        } else {
+            NetworkSandboxPolicy::from(&effective_sandbox_policy)
+        };
 
         let config = Self {
             model,
