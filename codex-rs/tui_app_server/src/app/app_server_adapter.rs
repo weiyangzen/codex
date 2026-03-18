@@ -294,14 +294,7 @@ fn resolve_chatgpt_auth_tokens_refresh_response(
         auth_credentials_store_mode,
         forced_chatgpt_workspace_id,
     )?;
-    if let Some(previous_account_id) = params.previous_account_id.as_deref()
-        && previous_account_id != auth.chatgpt_account_id
-    {
-        return Err(format!(
-            "local ChatGPT auth refresh account mismatch: expected `{previous_account_id}`, got `{}`",
-            auth.chatgpt_account_id
-        ));
-    }
+    let _ = params;
     Ok(auth.to_refresh_response())
 }
 
@@ -489,15 +482,71 @@ mod tests {
     use super::LegacyThreadNotification;
     use super::ServerNotificationThreadTarget;
     use super::legacy_thread_notification;
+    use super::resolve_chatgpt_auth_tokens_refresh_response;
     use super::server_notification_thread_target;
+    use base64::Engine;
+    use chrono::Utc;
+    use codex_app_server_protocol::AuthMode;
+    use codex_app_server_protocol::ChatgptAuthTokensRefreshParams;
+    use codex_app_server_protocol::ChatgptAuthTokensRefreshReason;
     use codex_app_server_protocol::JSONRPCNotification;
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnStartedNotification;
     use codex_app_server_protocol::TurnStatus;
+    use codex_core::auth::AuthCredentialsStoreMode;
+    use codex_core::auth::AuthDotJson;
+    use codex_core::auth::save_auth;
+    use codex_core::token_data::TokenData;
     use codex_protocol::ThreadId;
     use pretty_assertions::assert_eq;
+    use serde::Serialize;
     use serde_json::json;
+    use tempfile::TempDir;
+
+    fn fake_jwt(email: &str, account_id: &str, plan_type: &str) -> String {
+        #[derive(Serialize)]
+        struct Header {
+            alg: &'static str,
+            typ: &'static str,
+        }
+
+        let header = Header {
+            alg: "none",
+            typ: "JWT",
+        };
+        let payload = json!({
+            "email": email,
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id,
+                "chatgpt_plan_type": plan_type,
+            },
+        });
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let header_b64 = encode(&serde_json::to_vec(&header).expect("serialize header"));
+        let payload_b64 = encode(&serde_json::to_vec(&payload).expect("serialize payload"));
+        let signature_b64 = encode(b"sig");
+        format!("{header_b64}.{payload_b64}.{signature_b64}")
+    }
+
+    fn write_chatgpt_auth(codex_home: &std::path::Path) {
+        let id_token = fake_jwt("user@example.com", "workspace-1", "business");
+        let access_token = fake_jwt("user@example.com", "workspace-1", "business");
+        let auth = AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: codex_core::token_data::parse_chatgpt_jwt_claims(&id_token)
+                    .expect("id token should parse"),
+                access_token,
+                refresh_token: "refresh-token".to_string(),
+                account_id: Some("workspace-1".to_string()),
+            }),
+            last_refresh: Some(Utc::now()),
+        };
+        save_auth(codex_home, &auth, AuthCredentialsStoreMode::File)
+            .expect("chatgpt auth should save");
+    }
 
     #[test]
     fn legacy_warning_notification_extracts_thread_id_and_message() {
@@ -579,5 +628,26 @@ mod tests {
             server_notification_thread_target(&notification),
             ServerNotificationThreadTarget::InvalidThreadId("not-a-thread-id".to_string())
         );
+    }
+
+    #[test]
+    fn chatgpt_auth_refresh_ignores_previous_workspace_mismatch() {
+        let codex_home = TempDir::new().expect("tempdir");
+        write_chatgpt_auth(codex_home.path());
+
+        let response = resolve_chatgpt_auth_tokens_refresh_response(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            Some("workspace-1"),
+            &ChatgptAuthTokensRefreshParams {
+                reason: ChatgptAuthTokensRefreshReason::Unauthorized,
+                previous_account_id: Some("workspace-2".to_string()),
+            },
+        )
+        .expect("stale previous workspace should not fail local auth refresh");
+
+        assert_eq!(response.chatgpt_account_id, "workspace-1");
+        assert_eq!(response.chatgpt_plan_type.as_deref(), Some("business"));
+        assert!(!response.access_token.is_empty());
     }
 }
