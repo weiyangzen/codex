@@ -347,6 +347,73 @@ async fn stale_proactive_refresh_with_account_id_recovers_same_user_legacy_auth(
 
 #[tokio::test]
 #[serial(codex_api_key)]
+async fn stale_proactive_refresh_does_not_overwrite_a_different_account_on_disk() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let ctx = RefreshTokenTestContext::new(&server);
+    let stale_auth = managed_auth_dot_json(
+        "stale-access",
+        "stale-refresh",
+        Some("account-a"),
+        "user-a",
+        "user-a@example.com",
+        refresh_time_days_ago(31),
+    );
+    ctx.write_auth(&stale_auth);
+
+    let other_auth = managed_auth_dot_json(
+        "other-access",
+        "other-refresh",
+        Some("account-b"),
+        "user-b",
+        "user-b@example.com",
+        Utc::now(),
+    );
+    save_auth(
+        ctx.codex_home.path(),
+        &other_auth,
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("persist other-account auth");
+
+    let returned_auth = ctx.auth_manager.auth().await.expect("auth should exist");
+    assert_eq!(
+        returned_auth
+            .get_token_data()
+            .expect("token data")
+            .access_token,
+        "stale-access"
+    );
+    assert_eq!(
+        ctx.auth_manager
+            .auth_cached()
+            .expect("cached auth")
+            .get_token_data()
+            .expect("token data")
+            .access_token,
+        "stale-access"
+    );
+    assert_eq!(
+        CodexAuth::from_auth_storage(ctx.codex_home.path(), AuthCredentialsStoreMode::File)
+            .expect("load auth from disk")
+            .expect("persisted auth")
+            .get_token_data()
+            .expect("token data")
+            .access_token,
+        "other-access"
+    );
+
+    server.verify().await;
+}
+
+#[tokio::test]
+#[serial(codex_api_key)]
 async fn refresh_token_reused_without_account_id_recovers_same_user_that_gained_account_id() {
     let server = MockServer::start().await;
     let ctx = Arc::new(RefreshTokenTestContext::new(&server));

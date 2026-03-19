@@ -1167,13 +1167,12 @@ impl AuthManager {
     }
 
     fn reload_for_refresh(&self, cached_auth: &CodexAuth) -> ReloadOutcome {
-        let cached_account_id = cached_auth.get_account_id();
         let new_auth = self.load_auth_from_storage();
-        let new_account_id = new_auth.as_ref().and_then(CodexAuth::get_account_id);
 
         // `account_id` is the ChatGPT workspace/account boundary; if it is missing, only reload from disk when chatgpt_user_id or email still match.
-        if let Some(expected_account_id) = cached_account_id.as_deref() {
-            if new_account_id.as_deref() == Some(expected_account_id) {
+        if let Some(expected_account_id) = cached_auth.get_account_id() {
+            let new_account_id = new_auth.as_ref().and_then(CodexAuth::get_account_id);
+            if new_account_id.as_deref() == Some(expected_account_id.as_str()) {
                 tracing::info!("Reloading auth for account {expected_account_id}");
             } else if new_account_id.is_none()
                 && new_auth
@@ -1213,6 +1212,7 @@ impl AuthManager {
     }
 
     fn same_refresh_identity(cached_auth: &CodexAuth, new_auth: &CodexAuth) -> bool {
+        // Older auth files may lack account_id, so fall back to stable same-user claims.
         let cached_user_id = cached_auth.get_chatgpt_user_id();
         let new_user_id = new_auth.get_chatgpt_user_id();
         if cached_user_id.is_some() && cached_user_id == new_user_id {
@@ -1387,6 +1387,7 @@ impl AuthManager {
                     Err(RefreshTokenError::Permanent(error))
                         if error.reason == RefreshTokenFailedReason::Exhausted =>
                     {
+                        // Another local client may already have refreshed this auth lineage.
                         match self.reload_for_refresh(&auth) {
                             ReloadOutcome::ReloadedChanged => Ok(()),
                             ReloadOutcome::ReloadedNoChange | ReloadOutcome::Skipped => {
@@ -1447,9 +1448,15 @@ impl AuthManager {
                     "Skipping token refresh because auth changed after proactive reload."
                 );
             }
-            ReloadOutcome::ReloadedNoChange | ReloadOutcome::Skipped => {
+            ReloadOutcome::ReloadedNoChange => {
                 self.refresh_and_persist_chatgpt_token(chatgpt_auth, tokens.refresh_token)
                     .await?;
+            }
+            ReloadOutcome::Skipped => {
+                tracing::info!(
+                    "Skipping proactive token refresh because on-disk auth moved to another account."
+                );
+                return Ok(false);
             }
         }
         Ok(true)
