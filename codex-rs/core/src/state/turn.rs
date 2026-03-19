@@ -78,6 +78,33 @@ pub(crate) struct ApprovalOutcomeMetadata {
     pub(crate) approval_source: ApprovalSourceMetadata,
 }
 
+impl ApprovalOutcomeMetadata {
+    pub(crate) fn reviewed(
+        decision: &ReviewDecision,
+        approval_source: ApprovalSourceMetadata,
+    ) -> Self {
+        let review_decision = match decision {
+            ReviewDecision::Approved => ReviewDecisionMetadata::Approved,
+            ReviewDecision::Denied => ReviewDecisionMetadata::Denied,
+            ReviewDecision::Abort => ReviewDecisionMetadata::Abort,
+            ReviewDecision::ApprovedForSession => ReviewDecisionMetadata::ApprovedForSession,
+            ReviewDecision::ApprovedExecpolicyAmendment { .. }
+            | ReviewDecision::NetworkPolicyAmendment { .. } => ReviewDecisionMetadata::Approved,
+        };
+        Self {
+            review_decision: Some(review_decision),
+            approval_source,
+        }
+    }
+
+    pub(crate) fn policy() -> Self {
+        Self {
+            review_decision: None,
+            approval_source: ApprovalSourceMetadata::Policy,
+        }
+    }
+}
+
 impl ActiveTurn {
     pub(crate) fn add_task(&mut self, task: RunningTask) {
         let sub_id = task.turn_context.sub_id.clone();

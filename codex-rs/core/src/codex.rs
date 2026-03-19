@@ -329,7 +329,6 @@ use codex_protocol::models::DeveloperInstructions;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::ResponseItemMetadata;
-use codex_protocol::models::ReviewDecisionMetadata;
 use codex_protocol::models::SandboxPolicyMetadata;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -1062,28 +1061,6 @@ fn stamp_message_metadata_on_response_item(
             }
         }
         other => other,
-    }
-}
-
-fn review_decision_to_metadata(decision: &ReviewDecision) -> ReviewDecisionMetadata {
-    match decision {
-        ReviewDecision::Approved => ReviewDecisionMetadata::Approved,
-        ReviewDecision::ApprovedExecpolicyAmendment { .. } => {
-            ReviewDecisionMetadata::ApprovedWithAmendment
-        }
-        ReviewDecision::ApprovedForSession => ReviewDecisionMetadata::ApprovedForSession,
-        ReviewDecision::NetworkPolicyAmendment {
-            network_policy_amendment,
-        } => match network_policy_amendment.action {
-            codex_protocol::protocol::NetworkPolicyRuleAction::Allow => {
-                ReviewDecisionMetadata::ApprovedWithNetworkPolicyAllow
-            }
-            codex_protocol::protocol::NetworkPolicyRuleAction::Deny => {
-                ReviewDecisionMetadata::DeniedWithNetworkPolicyDeny
-            }
-        },
-        ReviewDecision::Denied => ReviewDecisionMetadata::Denied,
-        ReviewDecision::Abort => ReviewDecisionMetadata::Abort,
     }
 }
 
@@ -3457,42 +3434,14 @@ impl Session {
             });
         drop(ts);
         drop(active);
-        self.record_direct_approval_outcome(
-            &pending_approval.call_id,
-            decision,
-            pending_approval.approval_source,
-        )
-        .await;
-    }
-
-    pub async fn record_direct_approval_outcome(
-        &self,
-        call_id: &str,
-        decision: &ReviewDecision,
-        approval_source: ApprovalSourceMetadata,
-    ) {
         self.record_call_approval_outcome(
-            call_id.to_string(),
-            ApprovalOutcomeMetadata {
-                review_decision: Some(review_decision_to_metadata(decision)),
-                approval_source,
-            },
+            pending_approval.call_id,
+            ApprovalOutcomeMetadata::reviewed(decision, pending_approval.approval_source),
         )
         .await;
     }
 
-    pub async fn record_policy_outcome(&self, call_id: &str) {
-        self.record_call_approval_outcome(
-            call_id.to_string(),
-            ApprovalOutcomeMetadata {
-                review_decision: None,
-                approval_source: ApprovalSourceMetadata::Policy,
-            },
-        )
-        .await;
-    }
-
-    async fn record_call_approval_outcome(
+    pub(crate) async fn record_call_approval_outcome(
         &self,
         call_id: String,
         outcome: ApprovalOutcomeMetadata,
