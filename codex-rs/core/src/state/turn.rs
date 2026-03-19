@@ -85,11 +85,22 @@ impl ApprovalOutcomeMetadata {
     ) -> Self {
         let review_decision = match decision {
             ReviewDecision::Approved => ReviewDecisionMetadata::Approved,
+            ReviewDecision::ApprovedExecpolicyAmendment { .. } => {
+                ReviewDecisionMetadata::ApprovedWithAmendment
+            }
             ReviewDecision::Denied => ReviewDecisionMetadata::Denied,
             ReviewDecision::Abort => ReviewDecisionMetadata::Abort,
             ReviewDecision::ApprovedForSession => ReviewDecisionMetadata::ApprovedForSession,
-            ReviewDecision::ApprovedExecpolicyAmendment { .. }
-            | ReviewDecision::NetworkPolicyAmendment { .. } => ReviewDecisionMetadata::Approved,
+            ReviewDecision::NetworkPolicyAmendment {
+                network_policy_amendment,
+            } => match network_policy_amendment.action {
+                codex_protocol::protocol::NetworkPolicyRuleAction::Allow => {
+                    ReviewDecisionMetadata::ApprovedWithNetworkPolicyAllow
+                }
+                codex_protocol::protocol::NetworkPolicyRuleAction::Deny => {
+                    ReviewDecisionMetadata::DeniedWithNetworkPolicyDeny
+                }
+            },
         };
         Self {
             review_decision: Some(review_decision),
