@@ -15,6 +15,7 @@ CHECKLIST_FILE="$REPO/Docs/researches/blueprint_checklist.md"
 AUTO_CLEANUP_ON_COMPLETE="${AUTO_CLEANUP_ON_COMPLETE:-0}"
 CODEX_EXEC_TIMEOUT_SECONDS="${CODEX_EXEC_TIMEOUT_SECONDS:-5400}"
 AUTO_PUSH_ON_CHECKPOINT="${AUTO_PUSH_ON_CHECKPOINT:-0}"
+MAX_BATCH_BYTES="${MAX_BATCH_BYTES:-102400}"
 TMUX_WRAP_ENABLED="${TMUX_WRAP_ENABLED:-1}"
 TMUX_SESSION_NAME="${TMUX_SESSION_NAME:-$PROJECT}"
 WORKER_MODE="${RESEARCH_GUARD_WORKER:-0}"
@@ -187,8 +188,10 @@ ITEM_TEXT="${PENDING_LINE#*:}"
 TARGET_TYPE="$(echo "$ITEM_TEXT" | sed -E 's/^- \[ \] \[([A-Z]+)\] .+$/\1/')"
 TARGET_PATH="$(echo "$ITEM_TEXT" | sed -E 's/^- \[ \] \[[A-Z]+\] //')"
 
-REPORT_DIR=""
-REPORT_PATH=""
+TARGET_DESC="${TARGET_TYPE} ${TARGET_PATH}"
+COMMIT_TITLE="${TARGET_TYPE} ${TARGET_PATH}"
+TASK=""
+
 if [[ "$TARGET_TYPE" == "DIR" ]]; then
   if [[ "$TARGET_PATH" == "." ]]; then
     REPORT_DIR="$REPO/Docs/researches"
@@ -196,22 +199,9 @@ if [[ "$TARGET_TYPE" == "DIR" ]]; then
     REPORT_DIR="$REPO/Docs/researches/$TARGET_PATH"
   fi
   REPORT_PATH="$REPORT_DIR/current_folder_research.md"
-else
-  FILE_DIR="$(dirname "$TARGET_PATH")"
-  FILE_BASE="$(basename "$TARGET_PATH")"
-  if [[ "$FILE_DIR" == "." ]]; then
-    REPORT_DIR="$REPO/Docs/researches"
-  else
-    REPORT_DIR="$REPO/Docs/researches/$FILE_DIR"
-  fi
-  REPORT_PATH="$REPORT_DIR/${FILE_BASE}_research.md"
-fi
+  mkdir -p "$REPORT_DIR"
 
-mkdir -p "$REPORT_DIR"
-set_state "running_exec"
-set_block 0
-
-read -r -d '' TASK <<PROMPT || true
+  read -r -d '' TASK <<PROMPT || true
 请研究${TARGET_TYPE} ${TARGET_PATH}。
 
 你在项目仓库根目录工作。请完成以下任务并直接修改文件：
@@ -231,12 +221,123 @@ read -r -d '' TASK <<PROMPT || true
 7) 若有变更，执行一次提交（不 push）：
    git add Docs/researches .ops || true
    git add -A
-   git commit -m "docs(research): ${TARGET_TYPE} ${TARGET_PATH}" || true
+   git commit -m "docs(research): ${COMMIT_TITLE}" || true
 
 要求：
 - 必须是实质研究，不要空文档或模板占位。
 - 使用 codex exec 非 REPL 模式执行本任务。
 PROMPT
+else
+  TARGET_DIR="$(dirname "$TARGET_PATH")"
+  BATCH_COUNT=0
+  BATCH_TOTAL_BYTES=0
+  BATCH_ITEMS=""
+
+  while IFS= read -r CAND_LINE; do
+    CAND_LINE_NO="${CAND_LINE%%:*}"
+    CAND_TEXT="${CAND_LINE#*:}"
+    CAND_PATH="$(echo "$CAND_TEXT" | sed -E 's/^- \[ \] \[FILE\] //')"
+    CAND_DIR="$(dirname "$CAND_PATH")"
+    [[ "$CAND_DIR" == "$TARGET_DIR" ]] || continue
+
+    CAND_ABS="$REPO/$CAND_PATH"
+    [[ -f "$CAND_ABS" ]] || continue
+    CAND_SIZE="$(wc -c < "$CAND_ABS" | tr -d ' ')"
+    if (( BATCH_COUNT > 0 )) && (( BATCH_TOTAL_BYTES + CAND_SIZE > MAX_BATCH_BYTES )); then
+      break
+    fi
+
+    if [[ "$CAND_DIR" == "." ]]; then
+      CAND_REPORT_DIR="$REPO/Docs/researches"
+    else
+      CAND_REPORT_DIR="$REPO/Docs/researches/$CAND_DIR"
+    fi
+    CAND_BASE="$(basename "$CAND_PATH")"
+    CAND_REPORT_PATH="$CAND_REPORT_DIR/${CAND_BASE}_research.md"
+    mkdir -p "$CAND_REPORT_DIR"
+
+    BATCH_COUNT=$((BATCH_COUNT + 1))
+    BATCH_TOTAL_BYTES=$((BATCH_TOTAL_BYTES + CAND_SIZE))
+    BATCH_ITEMS+="- 行${CAND_LINE_NO} | ${CAND_PATH} | ${CAND_REPORT_PATH} | ${CAND_SIZE} bytes"$'\n'
+  done < <(rg -n '^- \[ \] \[FILE\] ' "$CHECKLIST_FILE")
+
+  if (( BATCH_COUNT <= 1 )); then
+    FILE_DIR="$TARGET_DIR"
+    FILE_BASE="$(basename "$TARGET_PATH")"
+    if [[ "$FILE_DIR" == "." ]]; then
+      REPORT_DIR="$REPO/Docs/researches"
+    else
+      REPORT_DIR="$REPO/Docs/researches/$FILE_DIR"
+    fi
+    REPORT_PATH="$REPORT_DIR/${FILE_BASE}_research.md"
+    mkdir -p "$REPORT_DIR"
+    COMMIT_TITLE="FILE ${TARGET_PATH}"
+
+    read -r -d '' TASK <<PROMPT || true
+请研究FILE ${TARGET_PATH}。
+
+你在项目仓库根目录工作。请完成以下任务并直接修改文件：
+1) 深入阅读目标对象与其上下文依赖（调用方、被调用方、配置、测试、脚本、文档）。
+2) 产出详尽研究文档到：${REPORT_PATH}
+   - 必须包含章节：
+     - 场景与职责
+     - 功能点目的
+     - 具体技术实现（关键流程/数据结构/协议/命令）
+     - 关键代码路径与文件引用
+     - 依赖与外部交互
+     - 风险、边界与改进建议
+3) 文档文件名必须是“原文件名_research.md”。
+4) 文档写完后，把 checklist 第 ${LINE_NO} 行对应项从 [ ] 改为 [x]。
+5) 运行：bash .ops/generate_daily_research_todo.sh 更新当天 todo。
+6) 若有变更，执行一次提交（不 push）：
+   git add Docs/researches .ops || true
+   git add -A
+   git commit -m "docs(research): ${COMMIT_TITLE}" || true
+
+要求：
+- 必须是实质研究，不要空文档或模板占位。
+- 使用 codex exec 非 REPL 模式执行本任务。
+PROMPT
+  else
+    BATCH_LABEL="$TARGET_DIR"
+    if [[ "$BATCH_LABEL" == "." ]]; then
+      BATCH_LABEL="root"
+    fi
+    TARGET_DESC="FILE_BATCH ${BATCH_LABEL} (${BATCH_COUNT} files, ${BATCH_TOTAL_BYTES} bytes)"
+    COMMIT_TITLE="FILE_BATCH ${BATCH_LABEL} (${BATCH_COUNT} files)"
+
+    read -r -d '' TASK <<PROMPT || true
+请按同目录批次研究 FILE（总大小上限 ${MAX_BATCH_BYTES} bytes）。
+
+本批次文件如下（相近目录合并，避免过度零碎）：
+${BATCH_ITEMS}
+
+你在项目仓库根目录工作。请完成以下任务并直接修改文件：
+1) 逐个深入阅读本批次文件与其上下文依赖（调用方、被调用方、配置、测试、脚本、文档）。
+2) 为每个文件分别产出详尽研究文档到其对应路径（每个文件一个 `原文件名_research.md`，路径已在上方列表给出）。
+3) 每个文档必须包含章节：
+   - 场景与职责
+   - 功能点目的
+   - 具体技术实现（关键流程/数据结构/协议/命令）
+   - 关键代码路径与文件引用
+   - 依赖与外部交互
+   - 风险、边界与改进建议
+4) 文档写完后，将上方列表中的每个 checklist 行从 [ ] 改为 [x]。
+5) 运行：bash .ops/generate_daily_research_todo.sh 更新当天 todo。
+6) 若有变更，执行一次提交（不 push）：
+   git add Docs/researches .ops || true
+   git add -A
+   git commit -m "docs(research): ${COMMIT_TITLE}" || true
+
+要求：
+- 本批次必须是实质研究，不要空文档或模板占位。
+- 使用 codex exec 非 REPL 模式执行本任务。
+PROMPT
+  fi
+fi
+
+set_state "running_exec"
+set_block 0
 
 run_rc=0
 if [[ "$CODEX_EXEC_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && (( CODEX_EXEC_TIMEOUT_SECONDS > 0 )); then
@@ -262,11 +363,11 @@ fi
 
 if [[ "$run_rc" -eq 0 ]]; then
   set_state "exec_completed"
-  log "research exec finished for ${TARGET_TYPE} ${TARGET_PATH}"
+  log "research exec finished for ${TARGET_DESC}"
 elif [[ "$run_rc" -eq 124 ]]; then
   set_state "exec_timeout"
-  log "warn: research exec timeout for ${TARGET_TYPE} ${TARGET_PATH}"
+  log "warn: research exec timeout for ${TARGET_DESC}"
 else
   set_state "exec_failed"
-  log "warn: research exec failed rc=${run_rc} for ${TARGET_TYPE} ${TARGET_PATH}"
+  log "warn: research exec failed rc=${run_rc} for ${TARGET_DESC}"
 fi
