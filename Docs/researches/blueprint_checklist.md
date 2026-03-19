@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-20 07:41:01 +0800
+Generated at: 2026-03-20 07:51:02 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -100,7 +100,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/008_rejects_empty_update_hunk/expected
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/008_rejects_empty_update_hunk/input
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/009_requires_existing_file_for_update
-- [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/009_requires_existing_file_for_update/expected
+- [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/009_requires_existing_file_for_update/expected
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/009_requires_existing_file_for_update/input
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/010_move_overwrites_existing_destination
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/010_move_overwrites_existing_destination/expected
