@@ -1897,16 +1897,6 @@ fn add_additional_file_system_writes(
     }
 }
 
-fn dedup_absolute_paths(paths: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
-    let mut deduped = Vec::new();
-    for path in paths {
-        if !deduped.contains(&path) {
-            deduped.push(path);
-        }
-    }
-    deduped
-}
-
 /// Returns implicit readable roots for runtime-managed helper executables that
 /// must stay usable under restricted filesystem policies without requiring
 /// explicit user permission-profile entries.
@@ -1932,12 +1922,14 @@ fn helper_readable_roots(
         }
     });
 
-    dedup_absolute_paths(
-        zsh_path
-            .into_iter()
-            .chain(execve_wrapper_root)
-            .collect::<Vec<_>>(),
-    )
+    let mut readable_roots = Vec::new();
+    if let Some(zsh_path) = zsh_path {
+        readable_roots.push(zsh_path);
+    }
+    if let Some(execve_wrapper_root) = execve_wrapper_root {
+        readable_roots.push(execve_wrapper_root);
+    }
+    readable_roots
 }
 
 fn add_additional_file_system_reads(
