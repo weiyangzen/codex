@@ -335,7 +335,6 @@ async fn send_input_submits_user_message() {
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
-            metadata: None,
         },
     );
     let captured = harness
@@ -367,7 +366,6 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
-            metadata: None,
         },
     );
     let captured = harness
@@ -444,7 +442,6 @@ async fn spawn_agent_can_fork_parent_thread_history() {
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
-            metadata: None,
         },
     );
     let captured = harness
