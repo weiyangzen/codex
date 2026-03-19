@@ -1926,9 +1926,10 @@ fn helper_readable_roots(
         if let Some(arg0_root) = arg0_root.as_ref()
             && path.as_path().starts_with(arg0_root.as_path())
         {
-            return Some(arg0_root.clone());
+            Some(arg0_root.clone())
+        } else {
+            Some(path)
         }
-        Some(path)
     });
 
     dedup_absolute_paths(
