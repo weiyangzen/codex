@@ -19,6 +19,7 @@ use crate::protocol::v2::TurnStatus;
 use crate::protocol::v2::UserInput;
 use crate::protocol::v2::WebSearchAction;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentReasoningEvent;
 use codex_protocol::protocol::AgentReasoningRawContentEvent;
 use codex_protocol::protocol::AgentStatus;
@@ -184,10 +185,29 @@ impl ThreadHistoryBuilder {
         match item {
             RolloutItem::EventMsg(event) => self.handle_event(event),
             RolloutItem::Compacted(payload) => self.handle_compacted(payload),
+            RolloutItem::ResponseItem(item) => self.handle_response_item(item),
             RolloutItem::TurnContext(_)
-            | RolloutItem::SessionMeta(_)
-            | RolloutItem::ResponseItem(_) => {}
+            | RolloutItem::SessionMeta(_) => {}
         }
+    }
+
+    fn handle_response_item(&mut self, item: &ResponseItem) {
+        let item = match item {
+            ResponseItem::ImageGenerationCall {
+                id,
+                status,
+                revised_prompt,
+                result,
+            } => ThreadItem::ImageGeneration {
+                id: id.clone(),
+                status: status.clone(),
+                revised_prompt: revised_prompt.clone(),
+                result: result.clone(),
+            },
+            _ => return,
+        };
+
+        self.upsert_item_in_current_turn(item);
     }
 
     fn handle_user_message(&mut self, payload: &UserMessageEvent) {
@@ -1149,6 +1169,7 @@ mod tests {
     use codex_protocol::items::TurnItem as CoreTurnItem;
     use codex_protocol::items::UserMessageItem as CoreUserMessageItem;
     use codex_protocol::models::MessagePhase as CoreMessagePhase;
+    use codex_protocol::models::ResponseItem;
     use codex_protocol::models::WebSearchAction as CoreWebSearchAction;
     use codex_protocol::parse_command::ParsedCommand;
     use codex_protocol::protocol::AgentMessageEvent;
@@ -1348,6 +1369,65 @@ mod tests {
                 text: "Final reply".into(),
                 phase: Some(MessagePhase::FinalAnswer),
                 memory_citation: None,
+            }
+        );
+    }
+
+    #[test]
+    fn replays_image_generation_response_items_into_turn_history() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-image".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "generate an image".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::ResponseItem(ResponseItem::ImageGenerationCall {
+                id: "ig_123".into(),
+                status: "generating".into(),
+                revised_prompt: Some("draft prompt".into()),
+                result: String::new(),
+            }),
+            RolloutItem::ResponseItem(ResponseItem::ImageGenerationCall {
+                id: "ig_123".into(),
+                status: "completed".into(),
+                revised_prompt: Some("final prompt".into()),
+                result: "Zm9v".into(),
+            }),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-image".into(),
+                last_agent_message: None,
+            })),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0],
+            Turn {
+                id: "turn-image".into(),
+                status: TurnStatus::Completed,
+                error: None,
+                items: vec![
+                    ThreadItem::UserMessage {
+                        id: "item-1".into(),
+                        content: vec![UserInput::Text {
+                            text: "generate an image".into(),
+                            text_elements: Vec::new(),
+                        }],
+                    },
+                    ThreadItem::ImageGeneration {
+                        id: "ig_123".into(),
+                        status: "completed".into(),
+                        revised_prompt: Some("final prompt".into()),
+                        result: "Zm9v".into(),
+                    },
+                ],
             }
         );
     }
