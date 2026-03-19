@@ -17,6 +17,10 @@ common --noenable_runfiles
 common --enable_platform_specific_config
 common:linux --host_platform=//:local_linux
 common:windows --host_platform=//:local_windows
+# The hermetic glibc crt objects in the LLVM toolchain expect these startup
+# symbols from libc_nonshared.a on Linux.
+common:linux --@rules_rust//rust/settings:extra_rustc_flag=-Clink-arg=-lc_nonshared
+common:linux --@rules_rust//rust/settings:extra_exec_rustc_flag=-Clink-arg=-lc_nonshared
 common --@rules_cc//cc/toolchains/args/archiver_flags:use_libtool_on_macos=False
 common --@llvm//config:experimental_stub_libgcc_s
 
@@ -59,4 +63,3 @@ common:remote --jobs=800
 # TODO(team): Evaluate if this actually helps, zbarsky is not sure, everything seems bottlenecked on `core` either way.
 # Enable pipelined compilation since we are not bound by local CPU count.
 #common:remote --@rules_rust//rust/settings:pipelined_compilation
-

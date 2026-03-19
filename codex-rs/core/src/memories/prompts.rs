@@ -3,7 +3,6 @@ use crate::memories::phase_one;
 use crate::memories::storage::rollout_summary_file_stem_from_parts;
 use crate::truncate::TruncationPolicy;
 use crate::truncate::truncate_text;
-use askama::Template;
 use codex_protocol::openai_models::ModelInfo;
 use codex_state::Phase2InputSelection;
 use codex_state::Stage1Output;
@@ -12,26 +11,36 @@ use std::path::Path;
 use tokio::fs;
 use tracing::warn;
 
-#[derive(Template)]
-#[template(path = "memories/consolidation.md", escape = "none")]
-struct ConsolidationPromptTemplate<'a> {
-    memory_root: &'a str,
-    phase2_input_selection: &'a str,
-}
+const CONSOLIDATION_PROMPT_TEMPLATE: &str =
+    include_str!("../../templates/memories/consolidation.md");
+const STAGE_ONE_INPUT_TEMPLATE: &str = include_str!("../../templates/memories/stage_one_input.md");
+const MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_TEMPLATE: &str =
+    include_str!("../../templates/memories/read_path.md");
 
-#[derive(Template)]
-#[template(path = "memories/stage_one_input.md", escape = "none")]
-struct StageOneInputTemplate<'a> {
-    rollout_path: &'a str,
-    rollout_cwd: &'a str,
-    rollout_contents: &'a str,
-}
+fn render_prompt_template(template: &str, replacements: &[(&str, &str)]) -> anyhow::Result<String> {
+    let mut rendered = String::with_capacity(template.len());
+    let mut remainder = template;
 
-#[derive(Template)]
-#[template(path = "memories/read_path.md", escape = "none")]
-struct MemoryToolDeveloperInstructionsTemplate<'a> {
-    base_path: &'a str,
-    memory_summary: &'a str,
+    while let Some(start) = remainder.find("{{") {
+        let (prefix, suffix) = remainder.split_at(start);
+        rendered.push_str(prefix);
+
+        let suffix = &suffix["{{".len()..];
+        let Some(end) = suffix.find("}}") else {
+            anyhow::bail!("unclosed template placeholder");
+        };
+        let (placeholder, next) = suffix.split_at(end);
+        let key = placeholder.trim();
+        let Some((_, value)) = replacements.iter().find(|(candidate, _)| *candidate == key) else {
+            anyhow::bail!("missing value for template placeholder `{key}`");
+        };
+
+        rendered.push_str(value);
+        remainder = &next["}}".len()..];
+    }
+
+    rendered.push_str(remainder);
+    Ok(rendered)
 }
 
 /// Builds the consolidation subagent prompt for a specific memory root.
@@ -41,11 +50,14 @@ pub(super) fn build_consolidation_prompt(
 ) -> String {
     let memory_root = memory_root.display().to_string();
     let phase2_input_selection = render_phase2_input_selection(selection);
-    let template = ConsolidationPromptTemplate {
-        memory_root: &memory_root,
-        phase2_input_selection: &phase2_input_selection,
-    };
-    template.render().unwrap_or_else(|err| {
+    render_prompt_template(
+        CONSOLIDATION_PROMPT_TEMPLATE,
+        &[
+            ("memory_root", &memory_root),
+            ("phase2_input_selection", &phase2_input_selection),
+        ],
+    )
+    .unwrap_or_else(|err| {
         warn!("failed to render memories consolidation prompt template: {err}");
         format!(
             "## Memory Phase 2 (Consolidation)\nConsolidate Codex memories in: {memory_root}\n\n{phase2_input_selection}"
@@ -144,12 +156,14 @@ pub(super) fn build_stage_one_input_message(
 
     let rollout_path = rollout_path.display().to_string();
     let rollout_cwd = rollout_cwd.display().to_string();
-    Ok(StageOneInputTemplate {
-        rollout_path: &rollout_path,
-        rollout_cwd: &rollout_cwd,
-        rollout_contents: &truncated_rollout_contents,
-    }
-    .render()?)
+    render_prompt_template(
+        STAGE_ONE_INPUT_TEMPLATE,
+        &[
+            ("rollout_path", &rollout_path),
+            ("rollout_cwd", &rollout_cwd),
+            ("rollout_contents", &truncated_rollout_contents),
+        ],
+    )
 }
 
 /// Build prompt used for read path. This prompt must be added to the developer instructions. In
@@ -171,11 +185,14 @@ pub(crate) async fn build_memory_tool_developer_instructions(codex_home: &Path) 
         return None;
     }
     let base_path = base_path.display().to_string();
-    let template = MemoryToolDeveloperInstructionsTemplate {
-        base_path: &base_path,
-        memory_summary: &memory_summary,
-    };
-    template.render().ok()
+    render_prompt_template(
+        MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_TEMPLATE,
+        &[
+            ("base_path", &base_path),
+            ("memory_summary", &memory_summary),
+        ],
+    )
+    .ok()
 }
 
 #[cfg(test)]

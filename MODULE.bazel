@@ -105,6 +105,11 @@ inject_repo(crate, "zlib")
 
 # TODO(zbarsky): Enable annotation after fixing windows arm64 builds.
 crate.annotation(
+    build_script_env = {
+        # Build the bundled liblzma so hermetic Bazel links do not depend on
+        # host `/usr/lib` search paths.
+        "LZMA_API_STATIC": "1",
+    },
     crate = "lzma-sys",
     gen_build_script = "on",
 )
