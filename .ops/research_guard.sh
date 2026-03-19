@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/home/sansha/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/path:/home/sansha/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT="$(basename "$REPO")"
+CODEX_BIN="${CODEX_BIN:-/home/sansha/.nvm/versions/node/v24.14.0/bin/codex}"
+LOG_DIR="$REPO/.cron"
+LOG_FILE="$LOG_DIR/research_guard.log"
+STATE_FILE="$LOG_DIR/research_guard.state"
+BLOCK_FILE="$LOG_DIR/research_guard.block_count"
+LOCK_FILE="/tmp/${PROJECT}_research_guard.lock"
+CHECKLIST_FILE="$REPO/Docs/researches/blueprint_checklist.md"
+AUTO_CLEANUP_ON_COMPLETE="${AUTO_CLEANUP_ON_COMPLETE:-0}"
+CODEX_EXEC_TIMEOUT_SECONDS="${CODEX_EXEC_TIMEOUT_SECONDS:-5400}"
+AUTO_PUSH_ON_CHECKPOINT="${AUTO_PUSH_ON_CHECKPOINT:-0}"
+
+mkdir -p "$LOG_DIR" "$REPO/Docs/researches"
+
+ts() { date '+%F %T %z'; }
+log() { echo "[$(ts)] $*" >> "$LOG_FILE"; }
+set_state() { printf '%s\n' "$1" > "$STATE_FILE"; }
+set_block() { printf '%s\n' "$1" > "$BLOCK_FILE"; }
+
+auto_push_with_conflict_resolution() {
+  local branch upstream_ref remote_ref max_attempts attempt conflict_files path
+  max_attempts=3
+
+  if git push >/dev/null 2>&1; then
+    return 0
+  fi
+
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
+    log "warn: auto-resolve push aborted (detached HEAD)"
+    return 1
+  fi
+
+  upstream_ref="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [[ -z "$upstream_ref" ]]; then
+    if git push --set-upstream origin "$branch" >/dev/null 2>&1; then
+      log "push succeeded with upstream setup: origin/$branch"
+      return 0
+    fi
+    upstream_ref="origin/$branch"
+  fi
+
+  for ((attempt=1; attempt<=max_attempts; attempt++)); do
+    log "warn: git push failed; auto-resolve attempt=${attempt} using ${upstream_ref}"
+    if ! git fetch --prune origin "$branch" >/dev/null 2>&1; then
+      log "warn: auto-resolve fetch failed (attempt=${attempt})"
+      return 1
+    fi
+
+    remote_ref="$upstream_ref"
+    if ! git show-ref --verify --quiet "refs/remotes/${remote_ref}"; then
+      remote_ref="origin/$branch"
+    fi
+
+    if ! git rebase "$remote_ref" >/dev/null 2>&1; then
+      conflict_files="$(git diff --name-only --diff-filter=U || true)"
+      if [[ -z "$conflict_files" ]]; then
+        git rebase --abort >/dev/null 2>&1 || true
+        log "warn: rebase failed without conflict files (attempt=${attempt})"
+        return 1
+      fi
+
+      while [[ -n "$conflict_files" ]]; do
+        while IFS= read -r path; do
+          [[ -n "$path" ]] || continue
+          git checkout --ours -- "$path" >/dev/null 2>&1 || true
+          git add -- "$path" >/dev/null 2>&1 || true
+        done <<< "$conflict_files"
+
+        if ! GIT_EDITOR=true git rebase --continue >/dev/null 2>&1; then
+          conflict_files="$(git diff --name-only --diff-filter=U || true)"
+          if [[ -z "$conflict_files" ]]; then
+            if ! GIT_EDITOR=true git rebase --continue >/dev/null 2>&1; then
+              git rebase --abort >/dev/null 2>&1 || true
+              log "warn: rebase continue failed after auto-resolve (attempt=${attempt})"
+              return 1
+            fi
+          fi
+        fi
+
+        if [[ -d .git/rebase-merge || -d .git/rebase-apply ]]; then
+          conflict_files="$(git diff --name-only --diff-filter=U || true)"
+        else
+          conflict_files=""
+        fi
+      done
+
+      if [[ -d .git/rebase-merge || -d .git/rebase-apply ]]; then
+        git rebase --abort >/dev/null 2>&1 || true
+        log "warn: rebase still active after auto-resolve (attempt=${attempt})"
+        return 1
+      fi
+
+      log "auto-resolved rebase conflicts by preferring local changes"
+    fi
+
+    if git push >/dev/null 2>&1; then
+      log "push succeeded after auto-resolve attempt=${attempt}"
+      return 0
+    fi
+  done
+
+  log "warn: auto-resolve exhausted retries for git push"
+  return 1
+}
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log "skip: previous research guard run still active"
+  exit 0
+fi
+
+cd "$REPO"
+
+if [[ ! -x "$CODEX_BIN" ]]; then
+  if command -v codex >/dev/null 2>&1; then
+    CODEX_BIN="$(command -v codex)"
+  else
+    set_state "failed_no_codex"
+    log "error: codex binary not found"
+    exit 0
+  fi
+fi
+
+if ! bash .ops/generate_research_blueprint_checklist.sh >> "$LOG_FILE" 2>&1; then
+  set_state "failed_blueprint"
+  log "error: failed to generate research blueprint checklist"
+  exit 0
+fi
+
+TODO_OUT="$(bash .ops/generate_daily_research_todo.sh 2>>"$LOG_FILE" | tail -n 1 || true)"
+log "today_todo=${TODO_OUT}"
+
+PENDING_LINE="$(rg -n '^- \[ \] \[(DIR|FILE)\] ' "$CHECKLIST_FILE" | head -n 1 || true)"
+if [[ -z "$PENDING_LINE" ]]; then
+  set_state "completed"
+  set_block 0
+  log "all research checklist items completed"
+  if [[ "$AUTO_CLEANUP_ON_COMPLETE" == "1" && -x .ops/cleanup_research_cron.sh ]]; then
+    .ops/cleanup_research_cron.sh --execute >> "$LOG_FILE" 2>&1 || true
+  fi
+  exit 0
+fi
+
+LINE_NO="${PENDING_LINE%%:*}"
+ITEM_TEXT="${PENDING_LINE#*:}"
+TARGET_TYPE="$(echo "$ITEM_TEXT" | sed -E 's/^- \[ \] \[([A-Z]+)\] .+$/\1/')"
+TARGET_PATH="$(echo "$ITEM_TEXT" | sed -E 's/^- \[ \] \[[A-Z]+\] //')"
+
+REPORT_DIR=""
+REPORT_PATH=""
+if [[ "$TARGET_TYPE" == "DIR" ]]; then
+  if [[ "$TARGET_PATH" == "." ]]; then
+    REPORT_DIR="$REPO/Docs/researches"
+  else
+    REPORT_DIR="$REPO/Docs/researches/$TARGET_PATH"
+  fi
+  REPORT_PATH="$REPORT_DIR/current_folder_research.md"
+else
+  FILE_DIR="$(dirname "$TARGET_PATH")"
+  FILE_BASE="$(basename "$TARGET_PATH")"
+  if [[ "$FILE_DIR" == "." ]]; then
+    REPORT_DIR="$REPO/Docs/researches"
+  else
+    REPORT_DIR="$REPO/Docs/researches/$FILE_DIR"
+  fi
+  REPORT_PATH="$REPORT_DIR/${FILE_BASE}_research.md"
+fi
+
+mkdir -p "$REPORT_DIR"
+set_state "running_exec"
+set_block 0
+
+read -r -d '' TASK <<PROMPT || true
+请研究${TARGET_TYPE} ${TARGET_PATH}。
+
+你在项目仓库根目录工作。请完成以下任务并直接修改文件：
+1) 深入阅读目标对象与其上下文依赖（调用方、被调用方、配置、测试、脚本、文档）。
+2) 产出详尽研究文档到：${REPORT_PATH}
+   - 必须包含章节：
+     - 场景与职责
+     - 功能点目的
+     - 具体技术实现（关键流程/数据结构/协议/命令）
+     - 关键代码路径与文件引用
+     - 依赖与外部交互
+     - 风险、边界与改进建议
+3) 若目标是 FILE：文档文件名必须是“原文件名_research.md”。
+4) 若目标是 DIR：文档文件名必须是“current_folder_research.md”。
+5) 文档写完后，把 checklist 第 ${LINE_NO} 行对应项从 [ ] 改为 [x]。
+6) 运行：bash .ops/generate_daily_research_todo.sh 更新当天 todo。
+7) 若有变更，执行一次提交（不 push）：
+   git add Docs/researches .ops || true
+   git add -A
+   git commit -m "docs(research): ${TARGET_TYPE} ${TARGET_PATH}" || true
+
+要求：
+- 必须是实质研究，不要空文档或模板占位。
+- 使用 codex exec 非 REPL 模式执行本任务。
+PROMPT
+
+run_rc=0
+if [[ "$CODEX_EXEC_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && (( CODEX_EXEC_TIMEOUT_SECONDS > 0 )); then
+  timeout "$CODEX_EXEC_TIMEOUT_SECONDS" "$CODEX_BIN" --yolo exec "$TASK" >> "$LOG_FILE" 2>&1 || run_rc=$?
+else
+  "$CODEX_BIN" --yolo exec "$TASK" >> "$LOG_FILE" 2>&1 || run_rc=$?
+fi
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  git add -A
+  if ! git diff --cached --quiet; then
+    msg="chore(research): checkpoint $(date '+%F %T %z')"
+    if git commit -m "$msg" >/dev/null 2>&1; then
+      if [[ "$AUTO_PUSH_ON_CHECKPOINT" == "1" ]]; then
+        auto_push_with_conflict_resolution || true
+        log "checkpoint committed and push attempted: $msg"
+      else
+        log "checkpoint committed locally (auto-push disabled): $msg"
+      fi
+    fi
+  fi
+fi
+
+if [[ "$run_rc" -eq 0 ]]; then
+  set_state "exec_completed"
+  log "research exec finished for ${TARGET_TYPE} ${TARGET_PATH}"
+elif [[ "$run_rc" -eq 124 ]]; then
+  set_state "exec_timeout"
+  log "warn: research exec timeout for ${TARGET_TYPE} ${TARGET_PATH}"
+else
+  set_state "exec_failed"
+  log "warn: research exec failed rc=${run_rc} for ${TARGET_TYPE} ${TARGET_PATH}"
+fi
