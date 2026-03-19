@@ -15,6 +15,9 @@ CHECKLIST_FILE="$REPO/Docs/researches/blueprint_checklist.md"
 AUTO_CLEANUP_ON_COMPLETE="${AUTO_CLEANUP_ON_COMPLETE:-0}"
 CODEX_EXEC_TIMEOUT_SECONDS="${CODEX_EXEC_TIMEOUT_SECONDS:-5400}"
 AUTO_PUSH_ON_CHECKPOINT="${AUTO_PUSH_ON_CHECKPOINT:-0}"
+TMUX_WRAP_ENABLED="${TMUX_WRAP_ENABLED:-1}"
+TMUX_SESSION_NAME="${TMUX_SESSION_NAME:-$PROJECT}"
+WORKER_MODE="${RESEARCH_GUARD_WORKER:-0}"
 
 mkdir -p "$LOG_DIR" "$REPO/Docs/researches"
 
@@ -22,6 +25,37 @@ ts() { date '+%F %T %z'; }
 log() { echo "[$(ts)] $*" >> "$LOG_FILE"; }
 set_state() { printf '%s\n' "$1" > "$STATE_FILE"; }
 set_block() { printf '%s\n' "$1" > "$BLOCK_FILE"; }
+
+if [[ "$TMUX_WRAP_ENABLED" == "1" && "$WORKER_MODE" != "1" ]]; then
+  if command -v tmux >/dev/null 2>&1; then
+    exec 8>"$LOCK_FILE"
+    if ! flock -n 8; then
+      log "skip: research worker lock is busy"
+      exec 8>&-
+      exit 0
+    fi
+    flock -u 8 || true
+    exec 8>&-
+
+    tmux_cmd="cd \"$REPO\" && RESEARCH_GUARD_WORKER=1 bash .ops/research_guard.sh"
+    if tmux has-session -t "$TMUX_SESSION_NAME" 2>/dev/null; then
+      win_name="research-guard-$(date +%H%M%S)"
+      if tmux new-window -d -t "$TMUX_SESSION_NAME" -n "$win_name" "$tmux_cmd" >/dev/null 2>&1; then
+        log "delegated to existing tmux session=${TMUX_SESSION_NAME} window=${win_name}"
+        exit 0
+      fi
+      log "warn: tmux new-window failed for session=${TMUX_SESSION_NAME}; fallback local run"
+    else
+      if tmux new-session -d -s "$TMUX_SESSION_NAME" "$tmux_cmd" >/dev/null 2>&1; then
+        log "delegated to new tmux session=${TMUX_SESSION_NAME}"
+        exit 0
+      fi
+      log "warn: tmux new-session failed for session=${TMUX_SESSION_NAME}; fallback local run"
+    fi
+  else
+    log "warn: tmux not found; fallback local run"
+  fi
+fi
 
 auto_push_with_conflict_resolution() {
   local branch upstream_ref remote_ref max_attempts attempt conflict_files path
