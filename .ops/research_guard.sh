@@ -232,6 +232,7 @@ else
   BATCH_COUNT=0
   BATCH_TOTAL_BYTES=0
   BATCH_ITEMS=""
+  OVERSIZE_SINGLE_ALLOWED=0
 
   while IFS= read -r CAND_LINE; do
     CAND_LINE_NO="${CAND_LINE%%:*}"
@@ -243,6 +244,12 @@ else
     CAND_ABS="$REPO/$CAND_PATH"
     [[ -f "$CAND_ABS" ]] || continue
     CAND_SIZE="$(wc -c < "$CAND_ABS" | tr -d ' ')"
+    if (( BATCH_COUNT == 0 )) && (( CAND_SIZE > MAX_BATCH_BYTES )); then
+      OVERSIZE_SINGLE_ALLOWED=1
+      log "info: single file exceeds batch limit but allowed: path=${CAND_PATH} size=${CAND_SIZE} limit=${MAX_BATCH_BYTES}"
+    else
+      OVERSIZE_SINGLE_ALLOWED=0
+    fi
     if (( BATCH_COUNT > 0 )) && (( BATCH_TOTAL_BYTES + CAND_SIZE > MAX_BATCH_BYTES )); then
       break
     fi
@@ -259,6 +266,9 @@ else
     BATCH_COUNT=$((BATCH_COUNT + 1))
     BATCH_TOTAL_BYTES=$((BATCH_TOTAL_BYTES + CAND_SIZE))
     BATCH_ITEMS+="- 行${CAND_LINE_NO} | ${CAND_PATH} | ${CAND_REPORT_PATH} | ${CAND_SIZE} bytes"$'\n'
+    if (( OVERSIZE_SINGLE_ALLOWED == 1 )); then
+      break
+    fi
   done < <(rg -n '^- \[ \] \[FILE\] ' "$CHECKLIST_FILE")
 
   if (( BATCH_COUNT <= 1 )); then
@@ -331,6 +341,7 @@ ${BATCH_ITEMS}
 
 要求：
 - 本批次必须是实质研究，不要空文档或模板占位。
+- 若单文件本身超过 ${MAX_BATCH_BYTES} bytes，允许作为单文件批次继续研究，不要跳过。
 - 使用 codex exec 非 REPL 模式执行本任务。
 PROMPT
   fi
