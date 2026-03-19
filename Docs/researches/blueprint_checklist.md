@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-20 03:41:01 +0800
+Generated at: 2026-03-20 03:51:01 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -70,7 +70,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/apply-patch/src
 - [x] [DIR] codex-rs/apply-patch/tests
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures
-- [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios
+- [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/001_add_file
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/001_add_file/expected
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/002_multiple_operations
