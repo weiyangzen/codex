@@ -5949,6 +5949,7 @@ impl CodexMessageProcessor {
                 Op::UserInput {
                     items: mapped_items,
                     final_output_json_schema: params.output_schema,
+                    metadata: params.metadata,
                 },
             )
             .await;
