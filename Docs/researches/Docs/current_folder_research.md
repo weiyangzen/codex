@@ -77,7 +77,7 @@
 - 研究覆盖清单主文件，`Docs` 目录项在第 32 行（`Docs/researches/blueprint_checklist.md:32`）。
 
 2. `Docs/researches/todos_20260319.md`  
-- 当日 pending 快照，当前第一项即 `DIR Docs`（`Docs/researches/todos_20260319.md:14`）。
+- 当日 pending 快照；在本次勾选 `DIR Docs` 后，第一项已推进为 `DIR codex-cli`（`Docs/researches/todos_20260319.md:14`）。
 
 3. `Docs/researches/*.md`（已完成研究报告集合）  
 - 采用“路径镜像 + 固定命名”归档，如 `.ops/.github/.codex` 等目录研究结果。
