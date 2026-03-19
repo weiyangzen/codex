@@ -1167,33 +1167,49 @@ impl AuthManager {
     }
 
     fn reload_for_refresh(&self, cached_auth: &CodexAuth) -> ReloadOutcome {
-        match cached_auth.get_account_id() {
-            Some(expected_account_id) => {
-                self.reload_if_account_id_matches(Some(expected_account_id.as_str()))
-            }
-            None => {
-                tracing::info!(
-                    "Reloading auth with legacy identity guard for refresh because account id is unavailable."
-                );
-                let new_auth = self.load_auth_from_storage();
-                if !new_auth
+        let cached_account_id = cached_auth.get_account_id();
+        let new_auth = self.load_auth_from_storage();
+        let new_account_id = new_auth.as_ref().and_then(CodexAuth::get_account_id);
+
+        if let Some(expected_account_id) = cached_account_id.as_deref() {
+            if new_account_id.as_deref() == Some(expected_account_id) {
+                tracing::info!("Reloading auth for account {expected_account_id}");
+            } else if new_account_id.is_none()
+                && new_auth
                     .as_ref()
                     .is_some_and(|new_auth| Self::same_refresh_identity(cached_auth, new_auth))
-                {
-                    tracing::info!(
-                        "Skipping auth reload due to legacy identity mismatch during refresh."
-                    );
-                    return ReloadOutcome::Skipped;
-                }
-                let auth_changed =
-                    !Self::auths_equal_for_refresh(Some(cached_auth), new_auth.as_ref());
-                self.set_cached_auth(new_auth);
-                if auth_changed {
-                    ReloadOutcome::ReloadedChanged
-                } else {
-                    ReloadOutcome::ReloadedNoChange
-                }
+            {
+                tracing::info!(
+                    "Reloading auth with legacy identity fallback for refresh because the on-disk auth has no account id."
+                );
+            } else {
+                let found_account_id = new_account_id.as_deref().unwrap_or("unknown");
+                tracing::info!(
+                    "Skipping auth reload during refresh (expected account id: {expected_account_id}, found: {found_account_id})"
+                );
+                return ReloadOutcome::Skipped;
             }
+        } else {
+            tracing::info!(
+                "Reloading auth with legacy identity guard for refresh because account id is unavailable."
+            );
+            if !new_auth
+                .as_ref()
+                .is_some_and(|new_auth| Self::same_refresh_identity(cached_auth, new_auth))
+            {
+                tracing::info!(
+                    "Skipping auth reload due to legacy identity mismatch during refresh."
+                );
+                return ReloadOutcome::Skipped;
+            }
+        }
+
+        let auth_changed = !Self::auths_equal_for_refresh(Some(cached_auth), new_auth.as_ref());
+        self.set_cached_auth(new_auth);
+        if auth_changed {
+            ReloadOutcome::ReloadedChanged
+        } else {
+            ReloadOutcome::ReloadedNoChange
         }
     }
 

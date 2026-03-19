@@ -302,6 +302,51 @@ async fn stale_proactive_refresh_without_account_id_still_recovers_newer_local_a
 
 #[tokio::test]
 #[serial(codex_api_key)]
+async fn stale_proactive_refresh_with_account_id_recovers_same_user_legacy_auth() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let ctx = RefreshTokenTestContext::new(&server);
+    let stale_auth = managed_auth_dot_json(
+        "stale-access",
+        "stale-refresh",
+        Some("account-id"),
+        "user-123",
+        "user@example.com",
+        refresh_time_days_ago(31),
+    );
+    ctx.write_auth(&stale_auth);
+
+    let newer_auth = managed_auth_dot_json(
+        "newer-access",
+        "newer-refresh",
+        None,
+        "user-123",
+        "user@example.com",
+        Utc::now(),
+    );
+    save_auth(
+        ctx.codex_home.path(),
+        &newer_auth,
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("persist newer legacy auth");
+    let refreshed = ctx.auth_manager.auth().await.expect("auth should exist");
+    assert_eq!(
+        refreshed.get_token_data().expect("token data").access_token,
+        "newer-access"
+    );
+
+    server.verify().await;
+}
+
+#[tokio::test]
+#[serial(codex_api_key)]
 async fn refresh_token_reused_without_account_id_recovers_same_user_that_gained_account_id() {
     let server = MockServer::start().await;
     let ctx = Arc::new(RefreshTokenTestContext::new(&server));
@@ -333,6 +378,63 @@ async fn refresh_token_reused_without_account_id_recovers_same_user_that_gained_
                 AuthCredentialsStoreMode::File,
             )
             .expect("persist same-user auth during reused-token response");
+            ResponseTemplate::new(401)
+                .set_body_json(json!({"error": {"code": "refresh_token_reused"}}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    ctx.auth_manager
+        .refresh_token_from_authority()
+        .await
+        .expect("same-user legacy auth should recover");
+    assert_eq!(
+        ctx.auth_manager
+            .auth_cached()
+            .expect("cached auth")
+            .get_token_data()
+            .expect("token data")
+            .access_token,
+        "newer-access"
+    );
+
+    server.verify().await;
+}
+
+#[tokio::test]
+#[serial(codex_api_key)]
+async fn refresh_token_reused_with_account_id_recovers_same_user_legacy_auth() {
+    let server = MockServer::start().await;
+    let ctx = Arc::new(RefreshTokenTestContext::new(&server));
+    let stale_auth = managed_auth_dot_json(
+        "stale-access",
+        "stale-refresh",
+        Some("account-id"),
+        "user-a",
+        "user-a@example.com",
+        refresh_time_days_ago(31),
+    );
+    ctx.write_auth(&stale_auth);
+
+    let newer_auth = managed_auth_dot_json(
+        "newer-access",
+        "newer-refresh",
+        None,
+        "user-a",
+        "user-a@example.com",
+        Utc::now(),
+    );
+    let ctx_for_response = Arc::clone(&ctx);
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(move |_: &Request| {
+            save_auth(
+                ctx_for_response.codex_home.path(),
+                &newer_auth,
+                AuthCredentialsStoreMode::File,
+            )
+            .expect("persist same-user legacy auth during reused-token response");
             ResponseTemplate::new(401)
                 .set_body_json(json!({"error": {"code": "refresh_token_reused"}}))
         })
@@ -617,7 +719,7 @@ fn managed_auth_dot_json(
             id_token: IdTokenInfo {
                 email: Some(email.to_string()),
                 chatgpt_user_id: Some(chatgpt_user_id.to_string()),
-                raw_jwt: minimal_jwt(),
+                raw_jwt: minimal_jwt(chatgpt_user_id, email),
                 ..IdTokenInfo::default()
             },
             access_token: access_token.to_string(),
@@ -632,7 +734,7 @@ fn refresh_time_days_ago(days: i64) -> DateTime<Utc> {
     Utc::now() - Duration::days(days)
 }
 
-fn minimal_jwt() -> String {
+fn minimal_jwt(chatgpt_user_id: &str, email: &str) -> String {
     #[derive(Serialize)]
     struct Header {
         alg: &'static str,
@@ -643,7 +745,13 @@ fn minimal_jwt() -> String {
         alg: "none",
         typ: "JWT",
     };
-    let payload = json!({ "sub": "user-123" });
+    let payload = json!({
+        "sub": chatgpt_user_id,
+        "email": email,
+        "https://api.openai.com/auth": {
+            "chatgpt_user_id": chatgpt_user_id,
+        }
+    });
 
     let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let header_b64 = b64(&serde_json::to_vec(&header).expect("serialize header"));
