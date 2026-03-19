@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-19 16:14:01 +0800
+Generated at: 2026-03-19 16:34:01 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -9,7 +9,7 @@ Legend: `[ ]` pending, `[x]` researched.
 ## Directories
 - [x] [DIR] .
 - [x] [DIR] .codex
-- [ ] [DIR] .codex/skills
+- [x] [DIR] .codex/skills
 - [ ] [DIR] .codex/skills/babysit-pr
 - [ ] [DIR] .codex/skills/babysit-pr/agents
 - [ ] [DIR] .codex/skills/babysit-pr/references
