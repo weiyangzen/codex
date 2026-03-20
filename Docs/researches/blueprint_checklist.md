@@ -1819,8 +1819,8 @@ Legend: `[ ]` pending, `[x]` researched.
 - [ ] [FILE] codex-rs/core/src/original_image_detail.rs
 - [ ] [FILE] codex-rs/core/src/original_image_detail_tests.rs
 - [ ] [FILE] codex-rs/core/src/otel_init.rs
-- [ ] [FILE] codex-rs/core/src/packages/mod.rs
-- [ ] [FILE] codex-rs/core/src/packages/versions.rs
+- [x] [FILE] codex-rs/core/src/packages/mod.rs
+- [x] [FILE] codex-rs/core/src/packages/versions.rs
 - [ ] [FILE] codex-rs/core/src/path_utils.rs
 - [ ] [FILE] codex-rs/core/src/path_utils_tests.rs
 - [ ] [FILE] codex-rs/core/src/personality_migration.rs
