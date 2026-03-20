@@ -1,145 +1,215 @@
-# DIR codex-rs/core/src/bin 研究文档
+# Research: codex-rs/core/src/bin
 
 ## 概述
 
-`codex-rs/core/src/bin` 是 `codex-core` crate 的二进制可执行文件目录，目前包含一个单一但关键的开发工具：`codex-write-config-schema`。该工具负责从 Rust 类型定义自动生成 `config.toml` 的 JSON Schema 文件，用于配置验证和 IDE 自动补全。
+`codex-rs/core/src/bin` 目录包含 `codex-core` crate 的二进制可执行文件入口点。目前该目录仅包含一个文件：`config_schema.rs`，它是一个用于生成 `config.toml` JSON Schema 的独立工具。
 
 ---
 
 ## 场景与职责
 
-### 使用场景
+### 1. 配置 Schema 生成工具 (`codex-write-config-schema`)
 
-1. **开发工作流**：当修改 `ConfigToml` 或相关配置类型时，开发者需要运行此工具更新 schema 文件
-2. **CI/CD 验证**：确保生成的 schema 与代码中的类型定义保持同步
-3. **IDE 支持**：为编辑器提供配置文件的自动补全和验证能力
+**场景：**
+- 开发者修改了 `ConfigToml` 或相关配置类型的结构后，需要更新 `config.schema.json` 文件
+- CI/CD 流程中验证配置 schema 是否与代码同步
+- 为 IDE 提供配置文件的自动补全和验证支持
 
-### 核心职责
-
-- 从 Rust 类型定义（`ConfigToml`）生成 JSON Schema
-- 规范化输出（按键排序）以确保生成的文件具有一致性
-- 写入到指定路径（默认为 `codex-rs/core/config.schema.json`）
+**职责：**
+- 基于 Rust 类型定义（`ConfigToml` 及其嵌套类型）自动生成 JSON Schema
+- 将生成的 schema 写入指定路径（默认为 `codex-rs/core/config.schema.json`）
+- 提供命令行参数支持自定义输出路径
 
 ---
 
 ## 功能点目的
 
-### 1. `codex-write-config-schema` 二进制
+### 1.1 Schema 生成的核心目的
 
-**文件**: `config_schema.rs` (20 行)
+JSON Schema 用于：
+1. **IDE 支持**：为 `config.toml` 提供 IntelliSense、类型检查和自动补全
+2. **配置验证**：在用户编辑配置文件时即时发现错误
+3. **文档生成**：作为配置文档的基础来源
+4. **向后兼容**：确保配置变更不会意外破坏现有用户配置
 
-| 组件 | 目的 |
-|------|------|
-| `Args` | 命令行参数解析，支持可选的 `--out` 参数指定输出路径 |
-| `main()` | 程序入口，调用 `codex_core::config::schema::write_config_schema()` 执行实际工作 |
+### 1.2 与 ConfigToml 的关联
 
-**命令行用法**:
-```bash
-# 使用默认路径 (codex-rs/core/config.schema.json)
-cargo run -p codex-core --bin codex-write-config-schema
+`config_schema.rs` 生成的 schema 直接反映 `ConfigToml` 结构体的字段：
 
-# 指定自定义输出路径
-cargo run -p codex-core --bin codex-write-config-schema -- --out /path/to/schema.json
+```rust
+// 关键类型层级（简化）
+ConfigToml
+├── model: Option<String>
+├── service_tier: Option<ServiceTier>
+├── features: Option<FeaturesToml>
+├── mcp_servers: Option<HashMap<String, RawMcpServerConfig>>
+├── permissions: Option<PermissionsToml>
+├── tui: Option<Tui>
+├── memories: Option<MemoriesToml>
+├── apps: Option<AppsConfigToml>
+├── otel: Option<OtelConfigToml>
+└── ... (约 50+ 个配置项)
 ```
-
-### 2. Schema 生成模块
-
-**文件**: `codex-rs/core/src/config/schema.rs` (100 行)
-
-| 函数 | 职责 |
-|------|------|
-| `config_schema()` | 使用 `schemars` 库生成 `ConfigToml` 的 JSON Schema，配置为 Draft 07 标准 |
-| `features_schema()` | 为 `[features]` 表生成 schema，包含所有已知特性标志和遗留键 |
-| `mcp_servers_schema()` | 为 `[mcp_servers]` 表生成 schema，使用原始输入形状 |
-| `canonicalize()` | 递归排序 JSON 对象的键，确保输出一致性 |
-| `config_schema_json()` | 生成格式化的 JSON schema 字节 |
-| `write_config_schema()` | 将 schema 写入指定文件路径 |
 
 ---
 
 ## 具体技术实现
 
-### 关键流程
+### 2.1 关键流程
 
-```
-┌─────────────────┐     ┌─────────────────────┐     ┌──────────────────┐
-│   CLI 参数解析   │────▶│  生成 RootSchema    │────▶│  规范化 JSON     │
-│   (clap)        │     │  (schemars)         │     │  (按键排序)       │
-└─────────────────┘     └─────────────────────┘     └──────────────────┘
-                                                               │
-                                                               ▼
-┌─────────────────┐     ┌─────────────────────┐     ┌──────────────────┐
-│   返回成功      │◀────│  写入文件系统       │◀────│  序列化为 JSON   │
-│                 │     │  (std::fs::write)   │     │  (serde_json)    │
-└─────────────────┘     └─────────────────────┘     └──────────────────┘
-```
+#### 2.1.1 命令行参数解析
 
-### 数据结构
-
-**`ConfigToml`** (位于 `codex-rs/core/src/config/mod.rs`):
-- 包含所有配置选项的 Rust 结构体
-- 使用 `serde::Deserialize` 和 `schemars::JsonSchema` derive 宏
-- 支持多层配置合并（基础配置 + 配置文件 + CLI 覆盖）
-
-**`FeatureSpec`** (位于 `codex-rs/core/src/features.rs`):
 ```rust
-pub struct FeatureSpec {
-    pub id: Feature,
-    pub key: &'static str,
-    pub stage: Stage,
-    pub default_enabled: bool,
+#[derive(Parser)]
+#[command(name = "codex-write-config-schema")]
+struct Args {
+    #[arg(short, long, value_name = "PATH")]
+    out: Option<PathBuf>,
 }
 ```
 
-**`RawMcpServerConfig`** (位于 `codex-rs/core/src/config/types.rs`):
-- MCP 服务器配置的原始输入形状
-- 支持 stdio 和 streamable_http 两种传输方式
+- 使用 `clap` 的 derive 宏定义 CLI
+- 支持 `-o/--out` 参数指定输出路径
+- 默认路径：`env!("CARGO_MANIFEST_DIR")/config.schema.json`
 
-### 协议与标准
+#### 2.1.2 Schema 生成流程
 
-- **JSON Schema Draft 07**: 使用的 schema 标准版本
-- **schemars**: Rust 的 JSON Schema 生成库
-- **TOML**: 配置文件的序列化格式
+```
+main()
+  └── codex_core::config::schema::write_config_schema(&out_path)
+      └── config_schema_json()
+          ├── config_schema()              // 生成 RootSchema
+          │   └── SchemaSettings::draft07()
+          │       .into_generator()
+          │       .into_root_schema_for::<ConfigToml>()
+          ├── serde_json::to_value(schema) // 序列化为 JSON Value
+          ├── canonicalize(&value)         // 按键名排序，确保输出稳定
+          └── serde_json::to_vec_pretty()  // 美化输出
+      └── std::fs::write(out_path, json)   // 写入文件
+```
+
+#### 2.1.3 特殊 Schema 处理
+
+`schema.rs` 中针对特定字段有自定义 schema 生成逻辑：
+
+**Features Schema** (`features_schema`):
+```rust
+pub(crate) fn features_schema(schema_gen: &mut SchemaGenerator) -> Schema {
+    // 1. 遍历 FEATURES 数组，为每个 feature 添加布尔类型的属性
+    // 2. 遍历 legacy_feature_keys()，为废弃的 feature key 添加支持
+    // 3. 设置 additional_properties: false，防止未知 key
+}
+```
+
+**MCP Servers Schema** (`mcp_servers_schema`):
+```rust
+pub(crate) fn mcp_servers_schema(schema_gen: &mut SchemaGenerator) -> Schema {
+    // 使用 RawMcpServerConfig 作为 additionalProperties 的值类型
+    // 允许任意 key，但 value 必须符合 RawMcpServerConfig 结构
+}
+```
+
+### 2.2 数据结构
+
+#### 2.2.1 核心依赖类型
+
+| 类型 | 位置 | 用途 |
+|------|------|------|
+| `ConfigToml` | `config/mod.rs` | 配置文件的根结构体 |
+| `FeaturesToml` | `features.rs` | `[features]` 段落的映射 |
+| `RawMcpServerConfig` | `config/types.rs` | MCP 服务器配置（原始输入形状） |
+| `PermissionsToml` | `config/permissions.rs` | 权限配置 |
+| `Tui` | `config/types.rs` | TUI 相关配置 |
+
+#### 2.2.2 Schema 生成设置
+
+```rust
+SchemaSettings::draft07()
+    .with(|settings| {
+        settings.option_add_null_type = false;  // Option<T> 不添加 null 类型
+    })
+```
+
+### 2.3 协议与格式
+
+#### 2.3.1 JSON Schema Draft 07
+- 使用 `schemars` crate 生成符合 Draft 07 标准的 schema
+- 支持 `$ref` 引用、复杂嵌套类型、枚举等
+
+#### 2.3.2 输出格式规范
+
+生成的 `config.schema.json` 特点：
+- **稳定排序**：通过 `canonicalize` 函数按键名字母顺序排序
+- **美化输出**：使用 `to_vec_pretty` 生成可读格式
+- **尾随换行**：文件以换行符结尾（符合 POSIX 规范）
 
 ---
 
 ## 关键代码路径与文件引用
 
-### 核心文件
-
-| 文件路径 | 描述 |
-|----------|------|
-| `codex-rs/core/src/bin/config_schema.rs` | 二进制入口点 |
-| `codex-rs/core/src/config/schema.rs` | Schema 生成逻辑 |
-| `codex-rs/core/src/config/schema_tests.rs` | Schema 测试 |
-| `codex-rs/core/config.schema.json` | 生成的 schema 文件（fixture） |
-| `codex-rs/core/Cargo.toml` | 定义 `[[bin]]` 目标 |
-
-### 相关配置文件
-
-```toml
-# codex-rs/core/Cargo.toml
-[[bin]]
-name = "codex-write-config-schema"
-path = "src/bin/config_schema.rs"
-```
-
-### 调用链
+### 3.1 文件结构
 
 ```
-config_schema.rs#main()
-    └── codex_core::config::schema::write_config_schema()
-            ├── config_schema()
-            │       └── SchemaSettings::draft07().into_generator().into_root_schema_for::<ConfigToml>()
-            ├── canonicalize()
-            └── std::fs::write()
+codex-rs/core/src/bin/
+└── config_schema.rs          # [本目录唯一文件] Schema 生成工具入口
+
+codex-rs/core/src/config/
+├── mod.rs                    # ConfigToml 定义，配置加载逻辑
+├── schema.rs                 # Schema 生成核心逻辑
+├── schema_tests.rs           # Schema 测试（验证与生成的 schema 一致）
+├── types.rs                  # 配置类型定义（MCP、TUI、Memories 等）
+├── permissions.rs            # 权限相关配置
+└── ...
+
+codex-rs/core/
+├── config.schema.json        # [生成文件] 实际使用的 schema 文件
+├── Cargo.toml                # 定义 [[bin]] codex-write-config-schema
+└── ...
+```
+
+### 3.2 调用链
+
+```
+# 开发者执行
+just write-config-schema
+
+# 实际命令（来自 justfile）
+cargo run -p codex-core --bin codex-write-config-schema
+
+# 执行流程
+codex-write-config-schema (bin)
+  └── codex_core::config::schema::write_config_schema (lib)
+      └── 写入 codex-rs/core/config.schema.json
+```
+
+### 3.3 测试验证
+
+`schema_tests.rs` 中的测试确保 schema 同步：
+
+```rust
+#[test]
+fn config_schema_matches_fixture() {
+    // 1. 读取现有的 config.schema.json 作为 fixture
+    // 2. 调用 config_schema_json() 生成当前 schema
+    // 3. 对比两者，如果不匹配则 panic
+    // 4. 提示开发者运行 `just write-config-schema` 更新
+}
 ```
 
 ---
 
 ## 依赖与外部交互
 
-### 直接依赖
+### 4.1 内部依赖
+
+| 模块 | 用途 |
+|------|------|
+| `codex_core::config::schema` | 核心 schema 生成逻辑 |
+| `codex_core::config::ConfigToml` | 配置结构体定义 |
+| `codex_core::config::types` | 嵌套配置类型 |
+| `codex_core::features` | Feature flags 定义（影响 schema） |
+
+### 4.2 外部依赖
 
 | Crate | 用途 |
 |-------|------|
@@ -148,89 +218,96 @@ config_schema.rs#main()
 | `schemars` | JSON Schema 生成 |
 | `serde_json` | JSON 序列化 |
 
-### 内部依赖
+### 4.3 构建系统集成
 
-| 模块 | 用途 |
-|------|------|
-| `codex_core::config::schema` | Schema 生成逻辑 |
-| `codex_core::config::ConfigToml` | 配置类型定义 |
-| `codex_core::config::types::RawMcpServerConfig` | MCP 服务器配置类型 |
-| `codex_core::features::FEATURES` | 特性标志列表 |
-| `codex_core::features::legacy_feature_keys()` | 遗留特性键 |
+**Cargo 配置** (`codex-rs/core/Cargo.toml`):
+```toml
+[[bin]]
+name = "codex-write-config-schema"
+path = "src/bin/config_schema.rs"
+```
 
-### 外部调用方
+**Just 任务** (`justfile`):
+```just
+write-config-schema:
+    cargo run -p codex-core --bin codex-write-config-schema
+```
 
-| 调用方 | 用途 |
-|--------|------|
-| `just write-config-schema` | justfile 中定义的便捷命令 |
-| CI/CD | 验证 schema 与代码同步 |
-| 开发者 | 手动更新 schema |
+**AGENTS.md 规范**:
+> If you change `ConfigToml` or nested config types, run `just write-config-schema` to update `codex-rs/core/config.schema.json`.
 
 ---
 
 ## 风险、边界与改进建议
 
-### 风险点
+### 5.1 当前风险
 
-1. **Schema 漂移风险**
-   - 当修改 `ConfigToml` 或相关类型时，如果忘记运行此工具，schema 文件将与代码不同步
-   - **缓解措施**: CI 中的 `config_schema_matches_fixture` 测试会检测这种漂移
+#### 5.1.1 Schema 漂移风险
+- **风险**：开发者修改配置类型后忘记更新 schema
+- **缓解**：CI 中运行 `cargo test -p codex-core config_schema_matches_fixture` 检测
+- **残余风险**：本地开发时可能忽略测试失败
 
-2. **测试依赖文件系统**
-   - `config_schema_matches_fixture` 测试需要读取实际的 `config.schema.json` 文件
-   - **缓解措施**: 使用 `codex_utils_cargo_bin::find_resource!` 在 Bazel 和 Cargo 环境下都能正确解析路径
+#### 5.1.2 废弃 Feature Key 的维护
+- **风险**：`legacy_feature_keys()` 需要手动维护，可能遗漏
+- **位置**：`features/legacy.rs`
+- **影响**：废弃的 feature key 不会出现在 schema 中，导致旧配置被标记为无效
 
-3. **平台差异**
-   - Windows 上的换行符处理（已在测试中通过 `replace("\r\n", "\n")` 处理）
+#### 5.1.3 平台特定配置的 Schema 表达
+- **限制**：某些配置项（如 Windows Sandbox）仅在特定平台有效，但 schema 无法表达这种条件关系
+- **示例**：`WindowsSandboxModeToml` 在 macOS 上无意义，但 schema 仍会显示
 
-### 边界情况
+### 5.2 边界情况
 
-1. **空输出路径**: 默认使用 `CARGO_MANIFEST_DIR/config.schema.json`
-2. **目录不存在**: `std::fs::write` 不会自动创建父目录（调用方需确保路径有效）
-3. **并发写入**: 无锁机制，并发运行可能导致文件损坏
+#### 5.2.1 路径处理
+- 默认输出路径依赖 `CARGO_MANIFEST_DIR` 环境变量
+- 如果该变量未设置（非 Cargo 环境），会使用当前目录
 
-### 改进建议
+#### 5.2.2 文件权限
+- 写入失败时返回 `anyhow::Error`，但错误信息较简单
+- 没有处理只读文件系统的特殊情况
 
-1. **自动创建父目录**
-   ```rust
-   if let Some(parent) = out_path.parent() {
-       std::fs::create_dir_all(parent)?;
-   }
-   ```
+### 5.3 改进建议
 
-2. **原子写入**
-   - 先写入临时文件，然后原子重命名，避免写入过程中断导致文件损坏
+#### 5.3.1 自动化检查
+```bash
+# 建议在 git pre-commit hook 中添加
+if git diff --name-only | grep -E "(config/.*\.rs|features\.rs)$"; then
+    cargo test -p codex-core config_schema_matches_fixture || exit 1
+fi
+```
 
-3. **验证模式**
-   - 添加 `--check` 模式，只验证 schema 是否最新而不写入，便于 CI 使用
+#### 5.3.2 Schema 版本控制
+- 当前 schema 无版本号字段
+- 建议添加 `$id` 或 `x-codex-version` 字段追踪 schema 版本
 
-4. **文档生成**
-   - 扩展工具以同时生成 Markdown 格式的配置文档
+#### 5.3.3 文档生成集成
+- 可将 schema 作为输入，自动生成配置文档
+- 现有文档分散在 `docs/config.md` 和 OpenAI 官网，可能不同步
 
-5. **Schema 版本控制**
-   - 在生成的 schema 中添加版本信息，便于追踪变更
-
----
-
-## 测试覆盖
-
-**文件**: `codex-rs/core/src/config/schema_tests.rs`
-
-| 测试 | 描述 |
-|------|------|
-| `config_schema_matches_fixture` | 验证生成的 schema 与 `config.schema.json` fixture 文件匹配 |
-
-测试使用 `pretty_assertions` 和 `similar::TextDiff` 提供清晰的差异输出，便于开发者理解 schema 变更。
+#### 5.3.4 验证模式增强
+- 当前仅验证结构，可添加更多语义验证（如数值范围、字符串格式）
+- 示例：`model_auto_compact_token_limit` 应为正整数
 
 ---
 
-## 相关文档
+## 附录：相关文件引用
 
-- `AGENTS.md`: "If you change `ConfigToml` or nested config types, run `just write-config-schema` to update `codex-rs/core/config.schema.json`."
-- `justfile`: 定义 `write-config-schema` 命令
-- `docs/`: 配置文档（如适用）
+### 代码文件
+- `codex-rs/core/src/bin/config_schema.rs` - 本目录唯一源文件
+- `codex-rs/core/src/config/schema.rs` - Schema 生成逻辑
+- `codex-rs/core/src/config/schema_tests.rs` - Schema 测试
+- `codex-rs/core/src/config/mod.rs` - ConfigToml 定义
+- `codex-rs/core/src/config/types.rs` - 配置类型
+- `codex-rs/core/src/features.rs` - Feature flags
 
----
+### 生成文件
+- `codex-rs/core/config.schema.json` - 生成的 JSON Schema
 
-*文档生成时间: 2026-03-21*
-*研究范围: codex-rs/core/src/bin 目录及其直接依赖*
+### 构建与配置
+- `codex-rs/core/Cargo.toml` - Crate 配置，定义 binary target
+- `justfile` - 快捷命令 `write-config-schema`
+- `AGENTS.md` - 开发规范文档
+
+### 文档
+- `docs/config.md` - 配置文档入口
+- `codex-rs/core/src/config/schema.md` - Schema 相关文档
