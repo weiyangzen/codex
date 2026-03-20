@@ -1,366 +1,255 @@
-# DIR Research: codex-rs/core/src/mcp
+# 研究文档：codex-rs/core/src/mcp
 
-## 概述
-
-`codex-rs/core/src/mcp` 目录实现了 Codex 的 **Model Context Protocol (MCP)** 核心管理功能。MCP 是 OpenAI 推出的标准化协议，用于让 AI 助手与外部工具和服务进行交互。该目录负责 MCP 服务器的配置管理、认证处理、工具聚合以及 Skill 依赖的自动安装。
+## 目录
+- [场景与职责](#场景与职责)
+- [功能点目的](#功能点目的)
+- [具体技术实现](#具体技术实现)
+- [关键代码路径与文件引用](#关键代码路径与文件引用)
+- [依赖与外部交互](#依赖与外部交互)
+- [风险、边界与改进建议](#风险边界与改进建议)
 
 ---
 
 ## 场景与职责
 
-### 核心场景
+### 核心定位
+`codex-rs/core/src/mcp` 目录实现了 **Model Context Protocol (MCP)** 的客户端管理功能。MCP 是 OpenAI 推出的开放协议，用于标准化 AI 模型与外部工具、数据源之间的交互。该模块在 Codex 项目中充当** MCP 客户端管理器**的角色，负责：
 
-1. **MCP 服务器生命周期管理**
-   - 管理用户配置的 MCP 服务器（通过 `config.toml`）
-   - 管理插件提供的 MCP 服务器（通过 `.mcp.json`）
-   - 管理内置的 Codex Apps MCP 服务器（`codex_apps`）
+1. **MCP 服务器生命周期管理**：连接、初始化、监控多个 MCP 服务器
+2. **工具聚合与分发**：从多个 MCP 服务器收集工具，统一暴露给 AI 模型
+3. **认证与授权**：处理 MCP 服务器的 OAuth 认证流程
+4. **Skill 依赖管理**：自动检测和安装 Skill 所需的 MCP 依赖
+5. **Codex Apps 集成**：特殊处理内置的 `codex_apps` MCP 服务器（用于连接 OpenAI 官方应用）
 
-2. **工具发现与聚合**
-   - 从多个 MCP 服务器收集可用工具
-   - 为工具生成符合 OpenAI Responses API 规范的限定名（`mcp__{server}__{tool}`）
-   - 处理工具名称冲突和规范化
-
-3. **认证与授权**
-   - 支持 OAuth 2.0 登录流程
-   - 管理 Bearer Token 认证
-   - 计算和缓存认证状态
-
-4. **Skill MCP 依赖管理**
-   - 自动检测 Skill 声明的 MCP 依赖
-   - 提示用户安装缺失的 MCP 服务器
-   - 自动配置和安装依赖
-
-### 职责边界
-
-| 组件 | 职责 | 不负责的职责 |
-|------|------|-------------|
-| `mcp/mod.rs` | 服务器配置聚合、工具快照收集、工具名处理 | 实际工具调用执行 |
-| `mcp/auth.rs` | OAuth 发现、认证状态计算、Scope 解析 | 实际 HTTP 请求发送 |
-| `mcp/skill_dependencies.rs` | Skill 依赖检测、用户提示、自动安装 | Skill 解析本身 |
-| `mcp_connection_manager.rs` | MCP 连接管理、客户端生命周期、elicitation 处理 | 配置管理 |
-| `mcp_tool_call.rs` | 实际工具调用执行、审批流程 | 工具发现 |
+### 使用场景
+- **本地开发**：通过 stdio 传输连接本地 MCP 服务器（如文件系统、数据库工具）
+- **云端服务**：通过 Streamable HTTP 传输连接远程 MCP 服务（如 GitHub、Google Drive 连接器）
+- **插件扩展**：通过 Plugin 系统动态注入 MCP 服务器配置
+- **Skill 执行**：当用户使用某个 Skill 时，自动安装其声明的 MCP 依赖
 
 ---
 
 ## 功能点目的
 
-### 1. 服务器配置管理 (`mod.rs`)
+### 1. MCP 服务器配置管理 (`mod.rs`)
+| 功能 | 目的 |
+|------|------|
+| `McpManager` | 提供配置服务器和有效服务器的查询接口 |
+| `configured_mcp_servers` | 合并用户配置和插件提供的 MCP 服务器 |
+| `effective_mcp_servers` | 在配置基础上动态添加/移除 `codex_apps` 服务器 |
+| `with_codex_apps_mcp` | 根据功能开关和认证状态控制 `codex_apps` 的启用 |
+| `collect_mcp_snapshot` | 收集所有可用 MCP 工具、资源、资源模板的快照 |
 
-**目的**：整合来自多个来源的 MCP 服务器配置
+### 2. 工具命名与分组 (`mod.rs`)
+| 功能 | 目的 |
+|------|------|
+| `split_qualified_tool_name` | 解析完全限定工具名 `mcp__server__tool` |
+| `group_tools_by_server` | 按服务器分组工具，便于管理和调用 |
+| `ToolPluginProvenance` | 追踪工具来源（哪个插件/连接器提供） |
 
-**配置来源优先级**（从高到低）：
-1. 用户配置（`config.toml` 中的 `mcp_servers`）
-2. 插件配置（`.mcp.json`）
-3. 内置 Codex Apps（当 `features.apps` 启用时）
+### 3. 认证管理 (`auth.rs`)
+| 功能 | 目的 |
+|------|------|
+| `oauth_login_support` | 检测 MCP 服务器是否支持 OAuth 登录 |
+| `discover_supported_scopes` | 自动发现服务器支持的 OAuth scopes |
+| `resolve_oauth_scopes` | 按优先级解析 scopes（显式 > 配置 > 发现 > 空） |
+| `compute_auth_statuses` | 计算所有服务器的认证状态 |
+| `McpAuthStatusEntry` | 记录服务器认证状态条目 |
 
-**关键函数**：
-- `configured_mcp_servers()` - 收集用户配置和插件配置的服务器
-- `effective_mcp_servers()` - 添加 Codex Apps 后的最终配置
-- `with_codex_apps_mcp()` - 动态添加/移除 Codex Apps 服务器
-
-### 2. 工具名规范化 (`mod.rs`)
-
-**目的**：将 MCP 工具名转换为符合 OpenAI Responses API 规范的格式
-
-**命名规则**：
-- 格式：`mcp__{server_name}__{tool_name}`
-- 分隔符：`__`（双下划线）
-- 限制：仅允许 `a-zA-Z0-9_-`，其他字符替换为 `_`
-- 长度限制：64 字符（超长时使用 SHA1 哈希截断）
-
-**示例**：
-```
-原始: "my-server/my.tool"
-规范化: "mcp__my_server__my_tool"
-```
-
-### 3. OAuth 认证管理 (`auth.rs`)
-
-**目的**：处理 MCP 服务器的 OAuth 2.0 认证流程
-
-**关键功能**：
-- `oauth_login_support()` - 检测服务器是否支持 OAuth
-- `discover_streamable_http_oauth()` - 自动发现 OAuth 配置
-- `resolve_oauth_scopes()` - 解析请求的权限范围（优先级：显式 > 配置 > 发现）
-- `compute_auth_statuses()` - 计算所有服务器的认证状态
-
-**Scope 优先级**：
-1. 显式提供的 scopes
-2. 配置文件中配置的 scopes
-3. 服务器发现的 scopes
-4. 空列表（无特殊权限）
-
-### 4. Skill MCP 依赖自动安装 (`skill_dependencies.rs`)
-
-**目的**：当用户使用需要特定 MCP 服务器的 Skill 时，自动提示并安装
-
-**流程**：
-1. 检测 Skill 声明的 MCP 依赖（`SkillToolDependency`）
-2. 检查哪些依赖尚未安装（使用 canonical key 匹配）
-3. 向用户显示安装提示（非全访问模式下）
-4. 用户确认后，将配置写入全局 `config.toml`
-5. 执行 OAuth 登录（如需要）
-6. 刷新 MCP 服务器连接
-
-**Canonical Key 生成**：
-```
-stdio: mcp__stdio__{command}
-streamable_http: mcp__streamable_http__{url}
-```
-
-### 5. 工具快照收集 (`mod.rs`)
-
-**目的**：在会话启动时收集所有可用工具的快照
-
-**流程**：
-1. 加载认证信息
-2. 获取有效的 MCP 服务器配置
-3. 创建 `McpConnectionManager`
-4. 并行收集：工具列表、资源列表、资源模板列表
-5. 转换和过滤工具格式
-6. 返回 `McpListToolsResponseEvent`
+### 4. Skill MCP 依赖管理 (`skill_dependencies.rs`)
+| 功能 | 目的 |
+|------|------|
+| `maybe_prompt_and_install_mcp_dependencies` | 检测缺失依赖并提示用户安装 |
+| `collect_missing_mcp_dependencies` | 收集 Skill 声明但未安装的 MCP 依赖 |
+| `maybe_install_mcp_dependencies` | 自动安装缺失的 MCP 服务器到全局配置 |
+| `canonical_mcp_server_key` | 生成规范化的 MCP 服务器标识键 |
+| `mcp_dependency_to_server_config` | 将 Skill 依赖转换为服务器配置 |
 
 ---
 
 ## 具体技术实现
 
-### 关键数据结构
+### 1. 关键数据结构
 
-#### `McpServerConfig` (`config/types.rs`)
-
+#### MCP 服务器配置 (`McpServerConfig`)
 ```rust
+// 位于 codex-rs/core/src/config/types.rs
 pub struct McpServerConfig {
-    pub transport: McpServerTransportConfig,  // 传输配置
-    pub enabled: bool,                        // 是否启用
-    pub required: bool,                       // 是否必需（失败时退出）
+    pub transport: McpServerTransportConfig,
+    pub enabled: bool,
+    pub required: bool,
     pub disabled_reason: Option<McpServerDisabledReason>,
     pub startup_timeout_sec: Option<Duration>,
     pub tool_timeout_sec: Option<Duration>,
-    pub enabled_tools: Option<Vec<String>>,   // 白名单
-    pub disabled_tools: Option<Vec<String>>,  // 黑名单
+    pub enabled_tools: Option<Vec<String>>,   // 工具白名单
+    pub disabled_tools: Option<Vec<String>>,  // 工具黑名单
     pub scopes: Option<Vec<String>>,          // OAuth scopes
-    pub oauth_resource: Option<String>,       // OAuth 资源参数
+    pub oauth_resource: Option<String>,       // RFC 8707 resource
 }
 ```
 
-#### `McpServerTransportConfig` (`config/types.rs`)
-
+#### 传输配置枚举
 ```rust
 pub enum McpServerTransportConfig {
-    Stdio {
-        command: String,
-        args: Vec<String>,
-        env: Option<HashMap<String, String>>,
-        env_vars: Vec<String>,
-        cwd: Option<PathBuf>,
-    },
-    StreamableHttp {
-        url: String,
-        bearer_token_env_var: Option<String>,
-        http_headers: Option<HashMap<String, String>>,
-        env_http_headers: Option<HashMap<String, String>>,
-    },
+    Stdio { command, args, env, env_vars, cwd },
+    StreamableHttp { url, bearer_token_env_var, http_headers, env_http_headers },
 }
 ```
 
-#### `ToolPluginProvenance` (`mod.rs`)
-
+#### 工具信息 (`ToolInfo` - 位于 `mcp_connection_manager.rs`)
 ```rust
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ToolPluginProvenance {
-    plugin_display_names_by_connector_id: HashMap<String, Vec<String>>,
-    plugin_display_names_by_mcp_server_name: HashMap<String, Vec<String>>,
+pub(crate) struct ToolInfo {
+    pub(crate) server_name: String,
+    pub(crate) tool_name: String,
+    pub(crate) tool_namespace: String,
+    pub(crate) tool: Tool,                    // rmcp::model::Tool
+    pub(crate) connector_id: Option<String>,
+    pub(crate) connector_name: Option<String>,
+    pub(crate) plugin_display_names: Vec<String>,
+    pub(crate) connector_description: Option<String>,
 }
 ```
 
-用于追踪工具来自哪个插件，在工具描述中附加插件来源信息。
+### 2. 关键流程
 
-### 关键流程
-
-#### 1. 工具名解析流程
-
+#### 2.1 MCP 快照收集流程 (`collect_mcp_snapshot`)
 ```
-输入: "mcp__alpha__do_thing"
-  ↓
-split_qualified_tool_name()
-  ↓
-前缀检查: "mcp" ✓
-服务器名: "alpha"
-工具名: "do_thing"
-  ↓
-输出: ("alpha", "do_thing")
-```
-
-#### 2. OAuth 认证状态计算流程
-
-```
-compute_auth_statuses(servers)
-  ↓
-for each server:
-  if stdio transport:
-    status = Unsupported
-  if streamable_http:
-    determine_streamable_http_auth_status()
-      ↓
-    check cached credentials
-      ↓
-    if expired:
-      return LoggedOut
-    if valid:
-      return LoggedIn
-    if no auth required:
-      return Unsupported
+1. 获取认证信息 (AuthManager)
+2. 创建 McpManager 实例
+3. 获取有效服务器列表 (effective_servers)
+4. 计算各服务器认证状态 (compute_auth_statuses)
+5. 创建 McpConnectionManager 实例
+6. 并行收集：
+   - list_all_tools()         → 所有工具
+   - list_all_resources()     → 所有资源
+   - list_all_resource_templates() → 所有资源模板
+7. 序列化并过滤结果
+8. 返回 McpListToolsResponseEvent
 ```
 
-#### 3. Skill MCP 依赖安装流程
-
+#### 2.2 Skill MCP 依赖安装流程
 ```
-maybe_prompt_and_install_mcp_dependencies()
-  ↓
-检查: 是否 first-party originator ✓
-检查: SkillMcpDependencyInstall feature 启用 ✓
-  ↓
-collect_missing_mcp_dependencies()
-  - 解析 Skill 依赖
-  - 生成 canonical key
-  - 对比已安装服务器
-  ↓
-filter_prompted_mcp_dependencies()
-  - 过滤已提示过的依赖
-  ↓
-should_install_mcp_dependencies()
-  - 全访问模式: 自动确认
-  - 否则: 显示用户提示
-  ↓
-maybe_install_mcp_dependencies()
-  - 加载全局配置
-  - 添加缺失的服务器配置
-  - 执行 OAuth 登录
-  - 刷新 MCP 连接
+1. 检查是否为一手客户端 (is_first_party_originator)
+2. 检查功能开关 (Feature::SkillMcpDependencyInstall)
+3. 获取已配置服务器列表
+4. 收集缺失依赖 (collect_missing_mcp_dependencies)
+5. 过滤已提示过的依赖
+6. 提示用户确认安装 (should_install_mcp_dependencies)
+7. 加载全局 MCP 配置
+8. 添加缺失服务器到配置
+9. 执行 OAuth 登录 (如需要)
+10. 刷新 MCP 服务器连接
 ```
 
-### 协议与规范
+#### 2.3 OAuth 认证流程 (`auth.rs`)
+```
+1. 检测 OAuth 支持 (oauth_login_support)
+   - 调用 discover_streamable_http_oauth()
+   - 获取授权端点和 scopes
+2. 解析 scopes 优先级
+   - 显式 scopes > 配置 scopes > 发现 scopes > 空
+3. 执行登录 (perform_oauth_login)
+4. 错误处理：
+   - 如果是 discovered scopes 被 provider 拒绝，
+     重试不带 scopes
+```
 
-#### MCP 协议支持
+### 3. 工具命名规范
 
-1. **stdio 传输**：通过标准输入/输出与子进程通信
-2. **Streamable HTTP 传输**：HTTP SSE 流式通信
-3. **OAuth 2.0**：支持授权码流程和 PKCE
+#### 完全限定工具名格式
+```
+mcp__<server_name>__<tool_name>
+```
+- 前缀：`mcp`
+- 分隔符：`__` (双下划线)
+- 示例：`mcp__github__create_issue`
 
-#### 自定义 MCP 扩展
+#### 特殊处理：Codex Apps
+对于 `codex_apps` 服务器（OpenAI 官方应用），工具命名采用不同策略：
+```
+<tool_namespace><tool_name>
+```
+- 工具名规范化：去除 connector 前缀
+- 命名空间：`mcp__codex_apps__<connector_name>`
 
-- `codex/sandbox-state` capability：服务器支持接收沙箱状态更新
-- `codex/sandbox-state/update` method：推送沙箱策略变更
+### 4. 工具过滤器 (`ToolFilter`)
+```rust
+pub(crate) struct ToolFilter {
+    enabled: Option<HashSet<String>>,   // 白名单
+    disabled: HashSet<String>,          // 黑名单
+}
+
+impl ToolFilter {
+    fn allows(&self, tool_name: &str) -> bool {
+        // 1. 检查白名单（如设置）
+        // 2. 检查黑名单
+    }
+}
+```
 
 ---
 
 ## 关键代码路径与文件引用
 
-### 核心文件
+### 本目录文件
 
-| 文件 | 行数 | 主要职责 |
-|------|------|---------|
-| `mod.rs` | 448 | 服务器配置聚合、工具快照、工具名处理 |
-| `auth.rs` | 288 | OAuth 认证、Scope 解析、认证状态计算 |
-| `skill_dependencies.rs` | 464 | Skill MCP 依赖检测与自动安装 |
-| `mod_tests.rs` | 263 | 单元测试 |
-| `skill_dependencies_tests.rs` | 107 | 依赖安装测试 |
+| 文件 | 职责 | 关键导出 |
+|------|------|----------|
+| `mod.rs` | 模块入口，MCP 配置管理 | `McpManager`, `ToolPluginProvenance`, `collect_mcp_snapshot` |
+| `auth.rs` | OAuth 认证管理 | `McpOAuthLoginConfig`, `compute_auth_statuses`, `resolve_oauth_scopes` |
+| `skill_dependencies.rs` | Skill MCP 依赖处理 | `maybe_prompt_and_install_mcp_dependencies`, `collect_missing_mcp_dependencies` |
+| `mod_tests.rs` | 模块单元测试 | - |
+| `skill_dependencies_tests.rs` | Skill 依赖测试 | - |
 
-### 关键代码路径
+### 核心依赖文件
 
-#### 1. 服务器配置加载路径
+| 文件 | 职责 | 与本模块关系 |
+|------|------|-------------|
+| `mcp_connection_manager.rs` | MCP 连接生命周期管理 | 被 `collect_mcp_snapshot` 调用，管理实际连接 |
+| `config/types.rs` | MCP 配置类型定义 | `McpServerConfig`, `McpServerTransportConfig` 定义 |
+| `plugins/manager.rs` | 插件管理 | 提供 `PluginsManager` 获取插件 MCP 配置 |
+| `skills/model.rs` | Skill 数据模型 | `SkillToolDependency` 定义 |
 
-```
-McpManager::effective_servers()
-  → effective_mcp_servers()
-    → configured_mcp_servers()  // 用户配置 + 插件配置
-    → with_codex_apps_mcp()     // 添加 Codex Apps
-```
+### 调用方文件
 
-#### 2. 工具调用路径
-
-```
-ToolHandler::handle() [tools/handlers/mcp.rs]
-  → handle_mcp_tool_call() [mcp_tool_call.rs]
-    → Session::call_tool()
-      → McpConnectionManager::call_tool()
-        → RmcpClient::call_tool()
-```
-
-#### 3. Skill 依赖安装触发路径
-
-```
-Codex::submit_turn()
-  → maybe_prompt_and_install_mcp_dependencies() [mcp/mod.rs]
-    → maybe_prompt_and_install_mcp_dependencies() [mcp/skill_dependencies.rs]
-      → collect_missing_mcp_dependencies()
-      → should_install_mcp_dependencies()
-      → maybe_install_mcp_dependencies()
-```
-
-#### 4. 认证状态检查路径
-
-```
-McpConnectionManager::new()
-  → compute_auth_statuses() [mcp/auth.rs]
-    → compute_auth_status()
-      → determine_streamable_http_auth_status() [codex_rmcp_client]
-```
-
-### 外部接口
-
-#### 与 `mcp_connection_manager.rs` 的交互
-
-- `McpConnectionManager::new()` - 创建连接管理器
-- `collect_mcp_snapshot_from_manager()` - 从管理器收集工具快照
-- `McpAuthStatusEntry` - 认证状态条目
-
-#### 与 `plugins/manager.rs` 的交互
-
-- `PluginsManager::plugins_for_config()` - 获取插件配置
-- `LoadedPlugins::effective_mcp_servers()` - 获取插件提供的 MCP 服务器
-
-#### 与 `codex.rs` 的交互
-
-- `maybe_prompt_and_install_mcp_dependencies()` - 在提交 turn 时调用
-- `Session::refresh_mcp_servers_now()` - 刷新 MCP 服务器连接
+| 文件 | 调用点 | 用途 |
+|------|--------|------|
+| `codex.rs` | `McpManager::new`, `maybe_prompt_and_install_mcp_dependencies` | 初始化 MCP 管理器，处理 Skill 依赖 |
+| `connectors.rs` | `McpManager::effective_servers` | 获取连接器配置 |
+| `state/service.rs` | `collect_mcp_snapshot` | 收集 MCP 快照供前端展示 |
+| `tools/router.rs` | `split_qualified_tool_name` | 解析工具调用 |
+| `tools/handlers/mcp_resource.rs` | 资源相关操作 | 处理 MCP 资源读取 |
 
 ---
 
 ## 依赖与外部交互
 
-### 内部依赖
+### 内部 Crate 依赖
 
 ```
-mcp/
-├── mod.rs
-│   ├── auth.rs                    # 认证子模块
-│   ├── skill_dependencies.rs      # Skill 依赖子模块
-│   └── mod_tests.rs               # 测试
-│
-依赖的同级模块:
-├── mcp_connection_manager.rs      # MCP 连接管理
-├── mcp_tool_call.rs               # 工具调用执行
-├── connectors.rs                  # Codex Apps 连接器
-├── plugins/manager.rs             # 插件管理
-├── config/types.rs                # 配置类型
-└── codex.rs                       # 主 Codex 逻辑
+codex-rs/core/src/mcp
+├── codex_protocol          # 协议类型 (McpListToolsResponseEvent, Tool, Resource)
+├── codex_rmcp_client       # MCP 客户端实现 (RmcpClient, perform_oauth_login)
+├── codex_config            # 配置管理 (Constrained)
+└── crate::plugins          # 插件管理 (PluginsManager, PluginCapabilitySummary)
+    └── crate::skills       # Skill 管理 (SkillMetadata, SkillToolDependency)
+        └── crate::config   # 配置类型 (McpServerConfig)
 ```
 
-### 外部 Crate 依赖
+### 外部协议依赖
 
-| Crate | 用途 |
-|-------|------|
-| `codex_rmcp_client` | MCP 客户端实现、OAuth 流程 |
-| `codex_protocol` | 协议类型定义（`McpListToolsResponseEvent`, `McpAuthStatus`） |
-| `rmcp` | MCP 协议模型（`Tool`, `Resource`, `RequestId`） |
-| `async_channel` | 异步事件通道 |
+| 协议/规范 | 用途 |
+|-----------|------|
+| MCP 2025-06-18 | Model Context Protocol 规范 |
+| OAuth 2.0 | MCP 服务器认证 |
+| RFC 8707 | Resource Indicators for OAuth 2.0 |
 
-### 配置依赖
+### 环境变量
 
-- `config.toml` 中的 `[mcp_servers]` 段
-- `config.toml` 中的 `[features]` 段（`apps`, `skill_mcp_dependency_install`）
-- 环境变量 `CODEX_CONNECTORS_TOKEN`（可选的 Bearer Token）
+| 变量 | 用途 |
+|------|------|
+| `CODEX_CONNECTORS_TOKEN` | Codex Apps MCP 服务器认证令牌 |
+| `CHATGPT_BASE_URL` | 决定 `codex_apps` MCP URL |
 
 ---
 
@@ -368,142 +257,92 @@ mcp/
 
 ### 已知风险
 
-#### 1. 工具名冲突
+1. **认证状态竞争条件**
+   - 风险：OAuth 认证状态可能在请求过程中变化
+   - 位置：`auth.rs` 的 `compute_auth_statuses`
+   - 缓解：状态计算后缓存，定期刷新
 
-**风险**：不同 MCP 服务器的工具可能生成相同的规范化名称
+2. **工具名冲突**
+   - 风险：不同服务器的工具可能产生相同限定名
+   - 位置：`mcp_connection_manager.rs` 的 `qualify_tools`
+   - 缓解：使用 SHA1 哈希去重，但可能导致工具名不可读
 
-**缓解措施**：
-- 使用 SHA1 哈希处理超长名称
-- 检测重复名称并跳过冲突工具
+3. **MCP 服务器启动超时**
+   - 风险：慢速 MCP 服务器可能导致启动超时
+   - 配置：`startup_timeout_sec` (默认 10s)
+   - 缓解：用户可配置更长的超时
 
-**代码位置**：`mcp_connection_manager.rs:155-199`
+4. **Skill 依赖安装失败**
+   - 风险：自动安装 MCP 依赖时可能失败（OAuth 拒绝、网络问题）
+   - 位置：`skill_dependencies.rs`
+   - 缓解：记录警告，允许用户手动重试
 
-#### 2. OAuth 认证失败
+### 边界条件
 
-**风险**：OAuth 流程可能因 scope 不匹配而失败
+1. **服务器名称限制**
+   - 必须匹配正则：`^[a-zA-Z0-9_-]+$`
+   - 验证位置：`mcp_connection_manager.rs` 的 `validate_mcp_server_name`
 
-**缓解措施**：
-- 实现 `should_retry_without_scopes()` 逻辑
-- 当 discovered scopes 被拒绝时，重试无 scope 请求
+2. **工具名长度限制**
+   - 最大 64 字符（Responses API 要求）
+   - 超长时使用 SHA1 截断
 
-**代码位置**：`auth.rs:115-118`
+3. **Codex Apps 缓存**
+   - 缓存位置：`~/.codex/cache/codex_apps_tools/<hash>.json`
+   - 缓存键：账户 ID + ChatGPT 用户 ID + 是否工作区账户
 
-#### 3. 循环依赖提示
-
-**风险**：用户多次使用相同 Skill 时重复提示安装
-
-**缓解措施**：
-- `filter_prompted_mcp_dependencies()` 记录已提示的依赖
-- 使用 canonical key 去重
-
-**代码位置**：`skill_dependencies.rs:49-63`
-
-### 边界情况
-
-#### 1. 全访问模式
-
-当 `AskForApproval::Never` 且沙箱策略为 `DangerFullAccess` 或 `ExternalSandbox` 时：
-- 自动安装 MCP 依赖，不提示用户
-- 代码：`skill_dependencies.rs:35-41`
-
-#### 2. 非 First-Party 客户端
-
-仅支持 first-party 客户端使用 Skill MCP 依赖安装功能：
-- 检查：`is_first_party_originator()`
-- 代码：`skill_dependencies.rs:142-146`
-
-#### 3. 配置优先级
-
-用户配置始终优先于插件配置：
-```rust
-// mod.rs:231-234
-for (name, plugin_server) in loaded_plugins.effective_mcp_servers() {
-    servers.entry(name).or_insert(plugin_server);  // or_insert = 不覆盖已有
-}
-```
+4. **Scope 解析优先级**
+   ```
+   explicit_scopes > configured_scopes > discovered_scopes > empty
+   ```
 
 ### 改进建议
 
-#### 1. 增强错误处理
+1. **增强错误处理**
+   - 当前：OAuth 错误仅记录警告
+   - 建议：向用户展示更友好的错误提示，提供重试机制
 
-**现状**：OAuth 错误仅记录警告日志
-**建议**：向用户显示友好的错误提示，包含重试选项
+2. **工具名可读性**
+   - 当前：冲突时使用 SHA1 哈希，难以阅读
+   - 建议：使用数字后缀或服务器前缀保持可读性
 
-#### 2. 支持 MCP 服务器热重载
+3. **MCP 服务器健康检查**
+   - 当前：仅在启动时检查
+   - 建议：定期心跳检测，自动重连失败的服务器
 
-**现状**：配置变更后需要重启会话
-**建议**：实现文件监听，自动检测 `config.toml` 变更并重新加载 MCP 服务器
+4. **依赖安装原子性**
+   - 当前：部分安装失败可能导致配置不一致
+   - 建议：使用事务性配置更新，失败时回滚
 
-#### 3. 工具使用统计
+5. **缓存失效策略**
+   - 当前：Codex Apps 工具缓存无显式失效机制
+   - 建议：添加 TTL 或手动刷新接口
 
-**现状**：无工具使用频率追踪
-**建议**：添加工具调用计数，用于优化工具列表排序（常用工具优先）
-
-#### 4. 改进 Scope 管理
-
-**现状**：Scope 冲突处理较为简单
-**建议**：
-- 实现 scope 权限预览界面
-- 支持细粒度的权限授予/拒绝
-
-#### 5. 缓存优化
-
-**现状**：Codex Apps 工具缓存基于用户 key
-**建议**：
-- 添加缓存失效策略（TTL）
-- 支持手动刷新缓存的命令
-
-#### 6. 测试覆盖
-
-**现状**：测试主要覆盖基础功能
-**建议**：
-- 添加 OAuth 流程的 mock 测试
-- 添加并发场景测试（多个 MCP 服务器同时初始化）
-- 添加错误恢复测试（服务器启动失败后重连）
+6. **并发优化**
+   - 当前：`collect_mcp_snapshot` 串行收集各服务器工具
+   - 建议：并行化工具收集，减少启动延迟
 
 ---
 
 ## 附录：关键常量
 
-| 常量 | 值 | 说明 |
-|------|-----|------|
-| `MCP_TOOL_NAME_PREFIX` | `"mcp"` | 工具名前缀 |
-| `MCP_TOOL_NAME_DELIMITER` | `"__"` | 分隔符 |
-| `CODEX_APPS_MCP_SERVER_NAME` | `"codex_apps"` | 内置服务器名 |
-| `CODEX_CONNECTORS_TOKEN_ENV_VAR` | `"CODEX_CONNECTORS_TOKEN"` | Token 环境变量 |
-| `MAX_TOOL_NAME_LENGTH` | `64` | 工具名最大长度 |
-| `DEFAULT_STARTUP_TIMEOUT` | `10s` | 默认启动超时 |
-| `DEFAULT_TOOL_TIMEOUT` | `120s` | 默认工具调用超时 |
+```rust
+// mod.rs
+const MCP_TOOL_NAME_PREFIX: &str = "mcp";
+const MCP_TOOL_NAME_DELIMITER: &str = "__";
+pub(crate) const CODEX_APPS_MCP_SERVER_NAME: &str = "codex_apps";
+const CODEX_CONNECTORS_TOKEN_ENV_VAR: &str = "CODEX_CONNECTORS_TOKEN";
+
+// mcp_connection_manager.rs
+const MCP_TOOL_NAME_DELIMITER: &str = "__";
+const MAX_TOOL_NAME_LENGTH: usize = 64;
+pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+const CODEX_APPS_TOOLS_CACHE_SCHEMA_VERSION: u8 = 1;
+const CODEX_APPS_TOOLS_CACHE_DIR: &str = "cache/codex_apps_tools";
+```
 
 ---
 
-## 附录：配置示例
-
-### config.toml
-
-```toml
-[features]
-apps = true
-skill_mcp_dependency_install = true
-
-[mcp_servers.my-server]
-type = "http"
-url = "https://example.com/mcp"
-scopes = ["read", "write"]
-
-[mcp_servers.local-tool]
-type = "stdio"
-command = "/usr/local/bin/mcp-server"
-args = ["--port", "8080"]
-```
-
-### Skill 依赖声明 (SKILL.md)
-
-```yaml
-dependencies:
-  tools:
-    - type: mcp
-      value: github
-      transport: streamable_http
-      url: https://github.com/mcp
-```
+*研究完成时间：2026-03-21*
+*研究范围：codex-rs/core/src/mcp 目录及其直接依赖*

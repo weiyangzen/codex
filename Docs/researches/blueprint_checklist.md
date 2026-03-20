@@ -215,7 +215,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/core/src/guardian
 - [x] [DIR] codex-rs/core/src/guardian/snapshots
 - [x] [DIR] codex-rs/core/src/instructions
-- [x] [DIR] codex-rs/core/src/mcp
+- [x] [DIR] codex-rs/core/src/mcp  <!-- research completed: /home/sansha/Github/codex/Docs/researches/codex-rs/core/src/mcp/current_folder_research.md -->
 - [ ] [DIR] codex-rs/core/src/memories
 - [ ] [DIR] codex-rs/core/src/models_manager
 - [ ] [DIR] codex-rs/core/src/packages
