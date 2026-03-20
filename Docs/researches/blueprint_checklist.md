@@ -234,16 +234,16 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/core/src/tools/runtimes/shell
 - [x] [DIR] codex-rs/core/src/unified_exec
 - [x] [DIR] codex-rs/core/templates
-- [ ] [DIR] codex-rs/core/templates/agents
-- [ ] [DIR] codex-rs/core/templates/collab
-- [ ] [DIR] codex-rs/core/templates/collaboration_mode
-- [ ] [DIR] codex-rs/core/templates/compact
-- [ ] [DIR] codex-rs/core/templates/memories
-- [ ] [DIR] codex-rs/core/templates/model_instructions
-- [ ] [DIR] codex-rs/core/templates/personalities
-- [ ] [DIR] codex-rs/core/templates/review
-- [ ] [DIR] codex-rs/core/templates/search_tool
-- [ ] [DIR] codex-rs/core/templates/tools
+- [x] [DIR] codex-rs/core/templates/agents
+- [x] [DIR] codex-rs/core/templates/collab
+- [x] [DIR] codex-rs/core/templates/collaboration_mode
+- [x] [DIR] codex-rs/core/templates/compact
+- [x] [DIR] codex-rs/core/templates/memories
+- [x] [DIR] codex-rs/core/templates/model_instructions
+- [x] [DIR] codex-rs/core/templates/personalities
+- [x] [DIR] codex-rs/core/templates/review
+- [x] [DIR] codex-rs/core/templates/search_tool
+- [x] [DIR] codex-rs/core/templates/tools
 - [ ] [DIR] codex-rs/core/tests
 - [ ] [DIR] codex-rs/core/tests/common
 - [ ] [DIR] codex-rs/core/tests/fixtures
@@ -2041,28 +2041,28 @@ Legend: `[ ]` pending, `[x]` researched.
 - [ ] [FILE] codex-rs/core/src/windows_sandbox_read_grants.rs
 - [ ] [FILE] codex-rs/core/src/windows_sandbox_read_grants_tests.rs
 - [ ] [FILE] codex-rs/core/src/windows_sandbox_tests.rs
-- [ ] [FILE] codex-rs/core/templates/agents/orchestrator.md
-- [ ] [FILE] codex-rs/core/templates/collab/experimental_prompt.md
-- [ ] [FILE] codex-rs/core/templates/collaboration_mode/default.md
-- [ ] [FILE] codex-rs/core/templates/collaboration_mode/execute.md
-- [ ] [FILE] codex-rs/core/templates/collaboration_mode/pair_programming.md
-- [ ] [FILE] codex-rs/core/templates/collaboration_mode/plan.md
-- [ ] [FILE] codex-rs/core/templates/compact/prompt.md
-- [ ] [FILE] codex-rs/core/templates/compact/summary_prefix.md
-- [ ] [FILE] codex-rs/core/templates/memories/consolidation.md
-- [ ] [FILE] codex-rs/core/templates/memories/read_path.md
-- [ ] [FILE] codex-rs/core/templates/memories/stage_one_input.md
-- [ ] [FILE] codex-rs/core/templates/memories/stage_one_system.md
-- [ ] [FILE] codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md
-- [ ] [FILE] codex-rs/core/templates/personalities/gpt-5.2-codex_friendly.md
-- [ ] [FILE] codex-rs/core/templates/personalities/gpt-5.2-codex_pragmatic.md
-- [ ] [FILE] codex-rs/core/templates/review/exit_interrupted.xml
-- [ ] [FILE] codex-rs/core/templates/review/exit_success.xml
-- [ ] [FILE] codex-rs/core/templates/review/history_message_completed.md
-- [ ] [FILE] codex-rs/core/templates/review/history_message_interrupted.md
-- [ ] [FILE] codex-rs/core/templates/search_tool/tool_description.md
-- [ ] [FILE] codex-rs/core/templates/search_tool/tool_suggest_description.md
-- [ ] [FILE] codex-rs/core/templates/tools/presentation_artifact.md
+- [x] [FILE] codex-rs/core/templates/agents/orchestrator.md
+- [x] [FILE] codex-rs/core/templates/collab/experimental_prompt.md
+- [x] [FILE] codex-rs/core/templates/collaboration_mode/default.md
+- [x] [FILE] codex-rs/core/templates/collaboration_mode/execute.md
+- [x] [FILE] codex-rs/core/templates/collaboration_mode/pair_programming.md
+- [x] [FILE] codex-rs/core/templates/collaboration_mode/plan.md
+- [x] [FILE] codex-rs/core/templates/compact/prompt.md
+- [x] [FILE] codex-rs/core/templates/compact/summary_prefix.md
+- [x] [FILE] codex-rs/core/templates/memories/consolidation.md
+- [x] [FILE] codex-rs/core/templates/memories/read_path.md
+- [x] [FILE] codex-rs/core/templates/memories/stage_one_input.md
+- [x] [FILE] codex-rs/core/templates/memories/stage_one_system.md
+- [x] [FILE] codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md
+- [x] [FILE] codex-rs/core/templates/personalities/gpt-5.2-codex_friendly.md
+- [x] [FILE] codex-rs/core/templates/personalities/gpt-5.2-codex_pragmatic.md
+- [x] [FILE] codex-rs/core/templates/review/exit_interrupted.xml
+- [x] [FILE] codex-rs/core/templates/review/exit_success.xml
+- [x] [FILE] codex-rs/core/templates/review/history_message_completed.md
+- [x] [FILE] codex-rs/core/templates/review/history_message_interrupted.md
+- [x] [FILE] codex-rs/core/templates/search_tool/tool_description.md
+- [x] [FILE] codex-rs/core/templates/search_tool/tool_suggest_description.md
+- [x] [FILE] codex-rs/core/templates/tools/presentation_artifact.md
 - [ ] [FILE] codex-rs/core/tests/all.rs
 - [ ] [FILE] codex-rs/core/tests/cli_responses_fixture.sse
 - [ ] [FILE] codex-rs/core/tests/common/BUILD.bazel
