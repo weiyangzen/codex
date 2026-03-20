@@ -2,7 +2,7 @@
 
 ## 概述
 
-`codex-rs/core/tests/fixtures` 是 Codex Rust 核心测试框架的测试夹具（fixtures）目录，用于存储测试所需的静态数据文件。该目录目前包含一个关键的 SSE（Server-Sent Events）测试夹具文件，用于测试流式响应的边界情况。
+`codex-rs/core/tests/fixtures` 是 Codex Rust 核心测试模块的测试夹具目录，用于存放测试所需的静态数据文件。该目录目前包含一个关键的 SSE（Server-Sent Events）测试夹具文件，用于测试流式响应的异常处理场景。
 
 ---
 
@@ -10,15 +10,17 @@
 
 ### 核心职责
 
-1. **提供静态测试数据**：为集成测试提供可复用的、版本控制的测试数据文件
-2. **模拟异常场景**：存储用于测试错误处理和边界情况的特殊数据文件
-3. **SSE 流测试支持**：专门支持 Server-Sent Events 流式响应的测试场景
+1. **测试数据提供**: 为集成测试提供标准化的静态测试数据
+2. **SSE 流模拟**: 提供不完整/异常的 SSE 流数据，用于测试系统的容错和重试机制
+3. **边界条件测试**: 支持测试流式响应在异常终止情况下的行为
 
 ### 使用场景
 
-- **流式响应中断测试**：模拟 SSE 流在未发送 `response.completed` 事件时提前关闭的情况
-- **重试逻辑验证**：验证客户端在遇到不完整 SSE 流时的自动重试行为
-- **错误恢复测试**：测试客户端从异常流状态恢复的能力
+| 场景 | 描述 |
+|------|------|
+| 流式响应异常测试 | 模拟 SSE 流在发送 `response.completed` 事件前意外终止的情况 |
+| 重试机制验证 | 验证客户端在收到不完整响应后是否正确触发重试 |
+| 错误恢复测试 | 测试系统从部分接收的 SSE 事件中恢复的能力 |
 
 ---
 
@@ -26,22 +28,22 @@
 
 ### 1. `incomplete_sse.json` - 不完整 SSE 流夹具
 
-**文件内容**：
+**文件内容**:
 ```json
 [
   {"type": "response.output_item.done"}
 ]
 ```
 
-**设计目的**：
-- 模拟一个"不完整"的 SSE 流，该流只发送了 `response.output_item.done` 事件，但没有发送 `response.completed` 事件
-- 用于测试客户端的重试机制：当 SSE 流异常终止（没有正常结束事件）时，客户端应该能够检测并重新请求
-- 验证 `stream_no_completed.rs` 测试用例中的重试逻辑
+**设计目的**:
+- 模拟一个"不完整"的 SSE 流，该流只包含 `response.output_item.done` 事件
+- 缺少正常的 `response.completed` 终止事件
+- 用于测试客户端的重试逻辑：当 SSE 流意外关闭而没有发送完成事件时，系统应自动重试请求
 
-**技术意义**：
-- 在正常的 OpenAI Responses API 流式响应中，`response.completed` 事件标志着响应的完整结束
-- 缺少该事件通常表示连接中断或服务器异常
-- 该夹具帮助测试客户端的健壮性和容错能力
+**关键特性**:
+- 格式：JSON 数组，每个元素代表一个 SSE 事件
+- 事件类型：`response.output_item.done`（表示输出项完成）
+- 缺失事件：`response.completed`（表示整个响应完成）
 
 ---
 
@@ -49,7 +51,7 @@
 
 ### SSE 夹具加载机制
 
-#### 1. 夹具加载函数 (`common/lib.rs`)
+**加载函数**: `load_sse_fixture()` (位于 `codex-rs/core/tests/common/lib.rs`)
 
 ```rust
 /// Builds an SSE stream body from a JSON fixture.
@@ -74,13 +76,41 @@ pub fn load_sse_fixture(path: impl AsRef<std::path::Path>) -> String {
 }
 ```
 
-**关键逻辑**：
-- 读取 JSON 数组，每个元素代表一个 SSE 事件
-- `type` 字段映射到 SSE 的 `event:` 行
-- 如果对象只有一个字段（仅 `type`），则不生成 `data:` 部分
-- 否则，将整个对象序列化为 `data:` 行
+**转换逻辑**:
+1. 读取 JSON 文件，解析为 `Vec<serde_json::Value>`
+2. 每个 JSON 对象必须包含 `type` 字段，对应 SSE 的 `event:` 值
+3. 如果对象只有 `type` 字段，生成无数据部分的 SSE 事件
+4. 如果对象包含其他字段，将完整 JSON 作为 `data:` 行输出
+5. 输出格式遵循 SSE 协议：`event: <type>\ndata: <json>\n\n`
 
-#### 2. 资源定位宏 (`codex_utils_cargo_bin::find_resource!`)
+### 资源定位机制
+
+**宏**: `find_resource!` (位于 `codex-rs/utils/cargo-bin/src/lib.rs`)
+
+```rust
+#[macro_export]
+macro_rules! find_resource {
+    ($resource:expr) => {{
+        let resource = std::path::Path::new(&$resource);
+        if $crate::runfiles_available() {
+            // Bazel 模式：通过 runfiles 解析
+            $crate::resolve_bazel_runfile(option_env!("BAZEL_PACKAGE"), resource)
+        } else {
+            // Cargo 模式：基于 CARGO_MANIFEST_DIR 解析
+            let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            Ok(manifest_dir.join(resource))
+        }
+    }};
+}
+```
+
+**双构建系统支持**:
+- **Cargo**: 使用 `CARGO_MANIFEST_DIR` 环境变量定位资源
+- **Bazel**: 使用 `runfiles` 系统在沙盒环境中解析资源路径
+
+### 测试用例实现
+
+**测试文件**: `codex-rs/core/tests/suite/stream_no_completed.rs`
 
 ```rust
 fn sse_incomplete() -> String {
@@ -88,18 +118,7 @@ fn sse_incomplete() -> String {
         .unwrap_or_else(|err| panic!("failed to resolve incomplete_sse fixture: {err}"));
     load_sse_fixture(fixture)
 }
-```
 
-**功能**：
-- 在运行时定位测试资源文件
-- 支持 Cargo 和 Bazel 两种构建系统的资源路径解析
-- 通过 `compile_data` 或 `build_script_data` 在 BUILD.bazel 中声明资源依赖
-
-### 测试使用示例
-
-#### `stream_no_completed.rs` - 流中断重试测试
-
-```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retries_on_early_close() {
     skip_if_no_network!();
@@ -118,68 +137,60 @@ async fn retries_on_early_close() {
         }],
     ])
     .await;
-
-    // Configure retry behavior...
+    
+    // 配置 model_provider 允许 1 次流重试
     let model_provider = ModelProviderInfo {
         // ...
-        stream_max_retries: Some(1),  // 允许 1 次重试
-        stream_idle_timeout_ms: Some(2000),
+        stream_max_retries: Some(1),
         // ...
     };
-
-    // 提交用户输入...
-    codex.submit(Op::UserInput { ... }).await.unwrap();
-
-    // 验证重试后成功完成
-    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
-
-    // 验证发生了重试（2 个请求）
+    
+    // 提交用户输入并等待 TurnComplete
+    // 验证服务器收到 2 个请求（第一次失败，第二次成功）
     let requests = server.requests().await;
     assert_eq!(requests.len(), 2, "expected retry after incomplete SSE stream");
 }
 ```
 
-**测试逻辑**：
-1. 第一次响应发送不完整的 SSE 流（没有 `response.completed`）
-2. 客户端检测到流异常终止，触发重试
-3. 第二次响应发送完整的 SSE 流
-4. 验证客户端成功完成回合，且总共发送了 2 个请求
+**测试流程**:
+1. 加载 `incomplete_sse.json` 作为第一次响应（模拟异常）
+2. 构造完整的 `completed_sse` 作为第二次响应（模拟重试成功）
+3. 启动流式 SSE 服务器，配置两次响应
+4. 配置 `ModelProviderInfo` 允许 1 次流重试 (`stream_max_retries: Some(1)`)
+5. 提交用户输入，等待 `TurnComplete` 事件
+6. 验证服务器收到 2 个请求，确认重试机制生效
 
 ---
 
 ## 关键代码路径与文件引用
 
-### 目录结构
+### 文件结构
 
 ```
 codex-rs/core/tests/fixtures/
 └── incomplete_sse.json          # 不完整 SSE 流夹具
 ```
 
-### 相关文件引用
+### 关键代码路径
 
-| 文件路径 | 用途 |
+| 文件路径 | 职责 |
 |---------|------|
-| `codex-rs/core/tests/fixtures/incomplete_sse.json` | 测试夹具：不完整 SSE 流 |
-| `codex-rs/core/tests/common/lib.rs` | 夹具加载函数 `load_sse_fixture` |
-| `codex-rs/core/tests/common/streaming_sse.rs` | 流式 SSE 测试服务器 |
+| `codex-rs/core/tests/fixtures/incomplete_sse.json` | 测试夹具：不完整 SSE 流数据 |
+| `codex-rs/core/tests/common/lib.rs` | 提供 `load_sse_fixture()` 加载函数 |
+| `codex-rs/core/tests/common/streaming_sse.rs` | 流式 SSE 测试服务器实现 |
 | `codex-rs/core/tests/suite/stream_no_completed.rs` | 使用夹具的测试用例 |
-| `codex-rs/core/tests/suite/client.rs` | 使用 `load_sse_fixture` 的客户端测试 |
-| `codex-rs/core/tests/suite/review.rs` | 使用 `load_sse_fixture` 的审查测试 |
+| `codex-rs/utils/cargo-bin/src/lib.rs` | 提供 `find_resource!` 宏 |
 
-### Bazel 构建配置
+### 调用链
 
-在 `codex-rs/core/BUILD.bazel` 中，测试夹具通过 `compile_data` 或 `build_script_data` 声明：
-
-```bazel
-# 测试目标需要包含 fixtures 目录作为编译时数据
-rust_test(
-    name = "core_tests",
-    compile_data = [
-        "tests/fixtures/incomplete_sse.json",
-        # ... 其他夹具
-    ],
-)
+```
+stream_no_completed.rs (测试)
+    ├── find_resource!("tests/fixtures/incomplete_sse.json")
+    │   └── codex-rs/utils/cargo-bin/src/lib.rs
+    └── load_sse_fixture(fixture)
+        └── codex-rs/core/tests/common/lib.rs
+            └── 读取并解析 incomplete_sse.json
+                └── 转换为 SSE 格式字符串
 ```
 
 ---
@@ -188,50 +199,28 @@ rust_test(
 
 ### 内部依赖
 
-```
-fixtures/incomplete_sse.json
-    ├── load_sse_fixture() [common/lib.rs]
-    │   ├── std::fs::File::open()
-    │   └── serde_json::from_reader()
-    ├── find_resource! [codex_utils_cargo_bin]
-    │   └── 支持 Cargo & Bazel 资源路径解析
-    └── start_streaming_sse_server() [streaming_sse.rs]
-        ├── tokio::net::TcpListener
-        └── SSE 流模拟服务器
-```
+| 依赖模块 | 用途 |
+|---------|------|
+| `codex_core::ModelProviderInfo` | 配置模型提供者和重试参数 |
+| `codex_protocol::protocol::EventMsg` | 事件消息类型定义 |
+| `core_test_support::load_sse_fixture` | SSE 夹具加载函数 |
+| `core_test_support::streaming_sse` | 流式 SSE 测试服务器 |
+| `codex_utils_cargo_bin::find_resource` | 资源定位宏 |
 
-### 外部交互
+### 外部依赖
 
-| 组件 | 交互方式 | 说明 |
-|-----|---------|------|
-| `codex_utils_cargo_bin` | 宏调用 `find_resource!` | 运行时资源定位 |
-| `serde_json` | 反序列化 | JSON 夹具解析 |
-| `tokio` | 异步运行时 | 流式服务器和测试执行 |
-| OpenAI Responses API | 协议模拟 | SSE 事件格式遵循 OpenAI API |
+| 依赖 | 用途 |
+|------|------|
+| `serde_json` | JSON 解析 |
+| `tokio` | 异步运行时 |
+| `wiremock` | HTTP 模拟服务器（其他测试用例） |
 
-### SSE 事件格式
+### 构建系统兼容性
 
-夹具中的 JSON 对象映射到 SSE 协议：
+该夹具目录支持两种构建系统：
 
-```json
-{"type": "response.output_item.done"}
-```
-
-转换为 SSE：
-```
-event: response.output_item.done
-
-```
-
-对比完整响应：
-```
-event: response.created
-data: {"type":"response.created","response":{"id":"resp-1"}}
-
-event: response.completed
-data: {"type":"response.completed","response":{"id":"resp-1",...}}
-
-```
+1. **Cargo**: 通过 `CARGO_MANIFEST_DIR` 定位资源
+2. **Bazel**: 通过 `runfiles` 系统在沙盒中解析资源路径
 
 ---
 
@@ -239,81 +228,52 @@ data: {"type":"response.completed","response":{"id":"resp-1",...}}
 
 ### 当前风险
 
-1. **单一夹具覆盖有限**：目前只有一个 `incomplete_sse.json` 夹具，无法覆盖所有 SSE 异常场景
-2. **硬编码路径**：测试代码中硬编码了夹具路径，如果文件移动会导致测试失败
-3. **无版本控制说明**：夹具文件没有文档说明其对应的 API 版本或协议版本
+| 风险 | 描述 | 严重程度 |
+|------|------|---------|
+| 单一夹具 | 目录仅包含一个测试夹具，覆盖场景有限 | 低 |
+| 硬编码路径 | 测试代码中硬编码夹具路径，移动文件需同步修改 | 低 |
+| 无版本控制 | 夹具格式变更可能影响多个测试 | 低 |
 
-### 边界情况
+### 边界条件
 
-1. **空数组夹具**：JSON 空数组 `[]` 会产生空 SSE 流，可能导致客户端无限等待
-2. **超大夹具**：如果夹具文件过大，可能影响测试加载速度
-3. **特殊字符**：JSON 中的特殊字符需要正确转义以符合 SSE 格式
+1. **SSE 格式兼容性**: 夹具格式必须与 `load_sse_fixture()` 函数的预期格式一致
+2. **事件类型有效性**: `type` 字段必须是有效的 SSE 事件类型
+3. **JSON 结构**: 必须是有效的 JSON 数组格式
 
 ### 改进建议
 
-#### 1. 扩展夹具覆盖范围
+1. **扩展夹具覆盖**:
+   - 添加更多异常场景夹具（如：无效 JSON、空数组、缺少 type 字段等）
+   - 添加不同 SSE 事件类型的夹具
 
-建议添加以下夹具文件：
+2. **文档化**:
+   - 为每个夹具添加 README 说明其用途和格式规范
+   - 添加夹具格式版本控制
 
-```
-fixtures/
-├── incomplete_sse.json              # 已存在：缺少 completed 事件
-├── empty_sse.json                   # 新增：完全空的 SSE 流
-├── malformed_sse.json               # 新增：格式错误的 SSE 事件
-├── timeout_sse.json                 # 新增：模拟超时场景
-├── retry_exhausted_sse.json         # 新增：重试次数耗尽场景
-└── websocket_fallback_sse.json      # 新增：WebSocket 降级场景
-```
+3. **工具函数增强**:
+   - 添加夹具验证工具，确保 JSON 格式符合 SSE 规范
+   - 支持动态生成夹具，减少静态文件维护成本
 
-#### 2. 添加夹具元数据
+4. **目录结构优化**:
+   ```
+   fixtures/
+   ├── sse/
+   │   ├── incomplete/
+   │   │   └── output_item_done_only.json
+   │   ├── errors/
+   │   │   └── invalid_event_type.json
+   │   └── complete/
+   │       └── full_conversation.json
+   └── README.md
+   ```
 
-为每个夹具添加注释说明：
+### 相关测试覆盖
 
-```json
-{
-  "_description": "模拟 SSE 流在发送 output_item.done 后异常关闭，缺少 response.completed 事件",
-  "_api_version": "v1",
-  "_scenario": "retry_on_incomplete_stream",
-  "events": [
-    {"type": "response.output_item.done"}
-  ]
-}
-```
-
-#### 3. 动态夹具生成
-
-考虑使用代码生成复杂夹具，而非静态文件：
-
-```rust
-pub fn generate_sse_fixture(events: Vec<SseEvent>) -> String {
-    // 动态生成 SSE 内容，支持更灵活的测试场景
-}
-```
-
-#### 4. 夹具验证测试
-
-添加测试确保夹具文件本身有效：
-
-```rust
-#[test]
-fn validate_fixtures() {
-    let fixture = load_sse_fixture("tests/fixtures/incomplete_sse.json");
-    assert!(!fixture.is_empty());
-    assert!(fixture.contains("event:"));
-}
-```
-
-#### 5. 文档自动化
-
-生成夹具文档脚本：
-
-```bash
-# 自动生成 fixtures/README.md 描述所有夹具用途
-just generate-fixture-docs
-```
+当前使用 `incomplete_sse.json` 的测试：
+- `stream_no_completed::retries_on_early_close` - 验证 SSE 流异常终止时的重试机制
 
 ---
 
 ## 总结
 
-`codex-rs/core/tests/fixtures` 目录虽然简单，但在测试框架中扮演关键角色。`incomplete_sse.json` 夹具专门用于测试 SSE 流异常场景，是验证客户端重试机制的重要组成部分。建议未来扩展更多夹具以覆盖完整的异常场景矩阵，并添加自动化文档和验证机制。
+`codex-rs/core/tests/fixtures` 是一个精简但关键的测试夹具目录，目前主要用于支持 SSE 流式响应的异常处理测试。`incomplete_sse.json` 夹具通过模拟不完整的 SSE 流（缺少 `response.completed` 事件），帮助验证系统的重试和容错机制。该目录的设计支持 Cargo 和 Bazel 双构建系统，通过 `find_resource!` 宏实现跨构建系统的资源定位。

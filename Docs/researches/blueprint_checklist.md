@@ -247,7 +247,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/core/tests
 - [x] [DIR] codex-rs/core/tests/common
 - [x] [DIR] codex-rs/core/tests/fixtures
-- [ ] [DIR] codex-rs/core/tests/suite
+- [x] [DIR] codex-rs/core/tests/suite
 - [ ] [DIR] codex-rs/core/tests/suite/snapshots
 - [ ] [DIR] codex-rs/debug-client
 - [ ] [DIR] codex-rs/debug-client/src
