@@ -1678,8 +1678,8 @@ Legend: `[ ]` pending, `[x]` researched.
 - [ ] [FILE] codex-rs/core/src/client_common_tests.rs
 - [ ] [FILE] codex-rs/core/src/client_tests.rs
 - [ ] [FILE] codex-rs/core/src/codex.rs
-- [ ] [FILE] codex-rs/core/src/codex/rollout_reconstruction.rs
-- [ ] [FILE] codex-rs/core/src/codex/rollout_reconstruction_tests.rs
+- [x] [FILE] codex-rs/core/src/codex/rollout_reconstruction.rs
+- [x] [FILE] codex-rs/core/src/codex/rollout_reconstruction_tests.rs
 - [ ] [FILE] codex-rs/core/src/codex_delegate.rs
 - [ ] [FILE] codex-rs/core/src/codex_delegate_tests.rs
 - [ ] [FILE] codex-rs/core/src/codex_tests.rs
