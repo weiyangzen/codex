@@ -1,90 +1,184 @@
-# DIR `codex-rs/exec-server/src/server` 研究报告
+# DIR codex-rs/exec-server/src/server 深度研究
 
-- 研究对象：`/home/sansha/Github/codex/codex-rs/exec-server/src/server`（DIR）
-- 研究日期：2026-03-21
-- 研究范围：exec-server 的服务器端核心实现，包括 JSON-RPC 协议处理、连接生命周期管理、初始化握手流程、传输层抽象及错误处理机制。
+## 概述
+
+`codex-rs/exec-server/src/server` 是 Codex 执行服务器的核心服务端实现目录，负责提供 JSON-RPC over WebSocket 的远程进程管理能力。该模块实现了基于 JSON-RPC 协议的通信层、请求处理器和生命周期管理，是 codex-exec-server 二进制服务的核心组件。
+
+---
 
 ## 场景与职责
 
-`exec-server/src/server` 是 Codex 执行服务器的核心服务器端实现模块，承担以下关键职责：
+### 核心场景
 
-1. **JSON-RPC 2.0 协议处理**
-   - 实现自定义的 JSON-RPC 消息解析与响应生成（`jsonrpc.rs`）
-   - 支持 Request/Notification/Response/Error 四种消息类型（`processor.rs:67-81`）
-   - 遵循与 `codex_app_server_protocol` 共享的协议定义
+1. **远程进程执行服务**：作为独立服务运行，为 Codex CLI 和其他客户端提供安全的远程进程管理能力
+2. **JSON-RPC 协议网关**：将 WebSocket 连接转换为结构化的 JSON-RPC 消息处理
+3. **生命周期管理**：处理客户端连接的初始化、握手和关闭流程
+4. **进程管理代理**：代理客户端的进程启动、输入输出、终止等操作（当前为 stub 实现）
 
-2. **连接生命周期管理**
-   - 通过 `run_connection` 函数管理单个 WebSocket 连接的完整生命周期（`processor.rs:18-61`）
-   - 处理连接事件：消息接收、格式错误、断开连接（`processor.rs:22-58`）
-   - 优雅关闭与资源清理（`processor.rs:60`）
+### 职责边界
 
-3. **初始化握手协议**
-   - 实现 LSP 风格的 initialize/initialized 握手流程（`handler.rs:24-39`）
-   - 确保每个连接只能初始化一次（`handler.rs:25-29`）
-   - 强制要求先收到 `initialize` 请求才能处理 `initialized` 通知（`handler.rs:34-36`）
+| 职责 | 说明 |
+|------|------|
+| 协议解析 | 处理 JSON-RPC 消息的序列化/反序列化 |
+| 连接管理 | 维护 WebSocket 连接的生命周期 |
+| 请求分发 | 根据 method 字段路由到对应处理器 |
+| 错误处理 | 返回标准 JSON-RPC 错误响应 |
+| 初始化握手 | 实现 initialize/initialized 握手协议 |
 
-4. **传输层抽象**
-   - 支持 WebSocket 传输（`transport.rs`）
-   - 默认监听地址 `ws://127.0.0.1:0`（`transport.rs:10`）
-   - 可扩展的 URL 解析机制（`transport.rs:35-47`）
-
-5. **Stub 阶段的占位实现**
-   - 当前仅实现 `initialize` 方法，其他方法返回 "not implement yet" 错误（`processor.rs:104-109`）
-   - 为后续 process/start、command/exec 等功能预留扩展点
+---
 
 ## 功能点目的
 
-### 1. JSON-RPC 错误处理标准化
+### 1. 传输层 (`transport.rs`)
 
-`jsonrpc.rs` 提供标准 JSON-RPC 2.0 错误码：
-- `-32600`: Invalid Request（无效请求）
-- `-32601`: Method Not Found（方法未找到）
-- `-32602`: Invalid Params（无效参数）
+**目的**：提供 WebSocket 监听和连接接受能力
 
-这些错误码与 `codex_app_server_protocol::JSONRPCErrorError` 兼容，确保客户端能正确解析。
+**关键功能**：
+- 解析 `--listen` 参数（支持 `ws://IP:PORT` 格式）
+- 创建 TCP 监听器并绑定到指定地址
+- 接受 WebSocket 连接并为每个连接创建独立任务
+- 默认监听地址：`ws://127.0.0.1:0`（随机端口）
 
-### 2. 连接事件驱动架构
+### 2. 连接处理 (`processor.rs`)
 
-`processor.rs` 采用事件驱动模型处理连接：
-- `JsonRpcConnectionEvent::Message`: 正常消息处理
-- `JsonRpcConnectionEvent::MalformedMessage`: 格式错误消息，返回错误但不中断连接
-- `JsonRpcConnectionEvent::Disconnected`: 连接断开，清理资源
+**目的**：处理单个客户端连接的完整生命周期
 
-### 3. 请求分发机制
+**关键功能**：
+- 消息循环：持续接收和处理客户端消息
+- 请求分发：将 JSON-RPC 请求路由到对应处理器
+- 通知处理：处理 `initialized` 等通知消息
+- 错误恢复：对畸形消息返回错误但保持连接
 
-`dispatch_request` 函数实现方法路由（`processor.rs:84-111`）：
-- 根据 `method` 字段匹配处理函数
-- 当前仅支持 `initialize` 方法
-- 其他方法返回 `method_not_found` 错误
+### 3. 请求处理器 (`handler.rs`)
 
-### 4. 通知处理机制
+**目的**：实现具体的 JSON-RPC 方法逻辑
 
-`handle_notification` 处理无需响应的通知消息（`processor.rs:113-121`）：
-- 当前仅支持 `initialized` 通知
-- 用于完成初始化握手流程
+**关键功能**：
+- `initialize`：处理客户端初始化请求，执行一次性握手
+- `initialized`：确认客户端已收到初始化响应
+- 状态管理：跟踪连接的初始化状态（原子布尔标志）
 
-### 5. WebSocket 传输层
+### 4. JSON-RPC 工具 (`jsonrpc.rs`)
 
-`transport.rs` 实现基于 `tokio-tungstenite` 的 WebSocket 服务器：
-- 异步监听指定地址
-- 每个连接独立 spawn 任务处理
-- 支持并发多连接
+**目的**：提供标准 JSON-RPC 错误构造和响应生成
+
+**关键功能**：
+- 标准错误码：`INVALID_REQUEST (-32600)`、`INVALID_PARAMS (-32602)`、`METHOD_NOT_FOUND (-32601)`
+- 响应包装：将结果或错误包装为标准 JSON-RPC 响应格式
+
+---
 
 ## 具体技术实现
 
-### 关键数据结构
+### 关键流程
 
-#### ExecServerHandler
-```rust
-pub(crate) struct ExecServerHandler {
-    initialize_requested: AtomicBool,
-    initialized: AtomicBool,
+#### 1. 服务器启动流程
+
+```
+codex-exec-server --listen ws://127.0.0.1:0
+    ↓
+parse_listen_url("ws://127.0.0.1:0") → SocketAddr
+    ↓
+TcpListener::bind(bind_address)
+    ↓
+loop {
+    listener.accept() → (stream, peer_addr)
+    tokio::spawn(async move {
+        accept_async(stream) → websocket
+        run_connection(JsonRpcConnection::from_websocket(...))
+    })
 }
 ```
-- 使用原子布尔值跟踪初始化状态
-- 确保线程安全的并发访问（`handler.rs:9-12`）
 
-#### JSON-RPC 消息类型
+**代码路径**：`transport.rs:49-82`
+
+#### 2. 连接处理流程
+
+```
+run_connection(connection)
+    ↓
+connection.into_parts() → (outgoing_tx, incoming_rx, _tasks)
+    ↓
+while let Some(event) = incoming_rx.recv().await {
+    match event {
+        Message(msg) → handle_connection_message(handler, msg)
+        MalformedMessage → send invalid_request_message
+        Disconnected → break
+    }
+}
+    ↓
+handler.shutdown().await
+```
+
+**代码路径**：`processor.rs:18-61`
+
+#### 3. 消息处理流程
+
+```
+handle_connection_message(handler, message)
+    ↓
+match message {
+    Request(req) → dispatch_request(handler, req) → Some(response)
+    Notification(notif) → handle_notification(handler, notif) → None
+    Response(resp) → Err("unexpected client response")
+    Error(err) → Err("unexpected client error")
+}
+```
+
+**代码路径**：`processor.rs:63-82`
+
+#### 4. 请求分发流程
+
+```
+dispatch_request(handler, request)
+    ↓
+match method {
+    "initialize" → {
+        serde_json::from_value::<InitializeParams>(params)
+        handler.initialize()
+        serde_json::to_value(response)
+        response_message(id, result)
+    }
+    other → response_message(id, Err(method_not_found(...)))
+}
+```
+
+**代码路径**：`processor.rs:84-111`
+
+#### 5. 初始化握手流程
+
+```
+客户端                              服务器
+  |                                    |
+  |--- JSONRPCRequest(initialize) --->|
+  |                                    | handler.initialize()
+  |<-- JSONRPCResponse(result: {}) ----|
+  |                                    |
+  |--- JSONRPCNotification(initialized) →|
+  |                                    | handler.initialized()
+  |                                    | (状态标记为已初始化)
+  |                                    |
+```
+
+**代码路径**：`handler.rs:24-39`
+
+### 数据结构
+
+#### 1. ExecServerHandler
+
+```rust
+pub(crate) struct ExecServerHandler {
+    initialize_requested: AtomicBool,  // 是否已收到 initialize 请求
+    initialized: AtomicBool,           // 是否已完成 initialized 通知
+}
+```
+
+**用途**：跟踪单个连接的初始化状态，确保：
+- `initialize` 只能调用一次
+- `initialized` 通知只能在 `initialize` 之后发送
+
+#### 2. JSON-RPC 消息类型（来自 codex-app-server-protocol）
+
 ```rust
 pub enum JSONRPCMessage {
     Request(JSONRPCRequest),
@@ -92,214 +186,276 @@ pub enum JSONRPCMessage {
     Response(JSONRPCResponse),
     Error(JSONRPCError),
 }
-```
-- 定义在 `codex_app_server_protocol` crate
-- 被 `processor.rs` 和 `connection.rs` 共享使用
 
-#### JsonRpcConnectionEvent
-```rust
-pub(crate) enum JsonRpcConnectionEvent {
-    Message(JSONRPCMessage),
-    MalformedMessage { reason: String },
-    Disconnected { reason: Option<String> },
+pub struct JSONRPCRequest {
+    pub id: RequestId,           // 请求标识（String 或 i64）
+    pub method: String,          // 方法名
+    pub params: Option<Value>,   // 参数
+    pub trace: Option<W3cTraceContext>, // 分布式追踪
+}
+
+pub struct JSONRPCNotification {
+    pub method: String,
+    pub params: Option<Value>,
+}
+
+pub struct JSONRPCResponse {
+    pub id: RequestId,
+    pub result: Value,
+}
+
+pub struct JSONRPCError {
+    pub id: RequestId,
+    pub error: JSONRPCErrorError,
+}
+
+pub struct JSONRPCErrorError {
+    pub code: i64,               // 错误码
+    pub message: String,         // 错误消息
+    pub data: Option<Value>,     // 附加数据
 }
 ```
-- 连接层向上层传递的事件抽象（`connection.rs:22-26`）
 
-### 关键流程
+#### 3. 协议常量
 
-#### 初始化握手流程
-1. 客户端发送 `initialize` Request（带 `InitializeParams`）
-2. 服务端检查是否已初始化，若否则标记 `initialize_requested=true`
-3. 服务端返回 `InitializeResponse`（当前为空对象）
-4. 客户端发送 `initialized` Notification
-5. 服务端验证已收到 `initialize`，标记 `initialized=true`
-6. 连接进入正常工作状态
+```rust
+pub const INITIALIZE_METHOD: &str = "initialize";
+pub const INITIALIZED_METHOD: &str = "initialized";
 
-#### 消息处理流程
-1. `run_connection` 循环接收 `JsonRpcConnectionEvent`
-2. 正常消息进入 `handle_connection_message`
-3. 根据消息类型分发：
-   - `Request` → `dispatch_request` → 方法路由 → 生成 Response
-   - `Notification` → `handle_notification` → 无返回
-   - `Response`/`Error` → 协议错误（服务端不应收到）
-4. 响应通过 `json_outgoing_tx` 发送回客户端
+pub const DEFAULT_LISTEN_URL: &str = "ws://127.0.0.1:0";
+```
 
-#### 错误处理流程
-- 格式错误消息：记录警告，返回 `invalid_request_message`，保持连接
-- 协议错误（如收到 Response）：记录警告，中断连接
-- 方法未找到：返回标准 JSON-RPC 错误，保持连接
+#### 4. 初始化参数/响应
 
-### 协议规范
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializeParams {
+    pub client_name: String,     // 客户端标识名称
+}
 
-#### 支持的传输协议
-- **WebSocket**: `ws://IP:PORT` 格式（`transport.rs:38-42`）
-- **stdio**（测试用）: 通过 `connection.rs` 的 `from_stdio` 方法
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializeResponse {}  // 当前为空对象
+```
 
-#### 当前支持的 JSON-RPC 方法
-| 方法 | 类型 | 状态 |
-|------|------|------|
-| `initialize` | Request | ✅ 已实现 |
-| `initialized` | Notification | ✅ 已实现 |
-| `process/start` | Request | ❌ Stub 返回错误 |
-| `command/exec` | Request | ❌ Stub 返回错误 |
-| 其他方法 | - | ❌ 返回 method_not_found |
+### 协议实现
+
+#### JSON-RPC 错误码
+
+| 错误码 | 常量 | 含义 |
+|--------|------|------|
+| -32600 | INVALID_REQUEST | 无效请求（如重复 initialize） |
+| -32601 | METHOD_NOT_FOUND | 方法不存在（当前大部分方法返回此错误） |
+| -32602 | INVALID_PARAMS | 参数无效（解析失败） |
+| -32000 | - | 传输关闭（客户端内部使用） |
+
+#### 支持的 Method
+
+| Method | 类型 | 状态 | 说明 |
+|--------|------|------|------|
+| `initialize` | Request | ✅ 已实现 | 初始化握手 |
+| `initialized` | Notification | ✅ 已实现 | 初始化确认 |
+| `command/exec` | Request | ❌ Stub | 启动进程（文档中定义，未实现） |
+| `command/exec/write` | Request | ❌ Stub | 写入进程输入 |
+| `command/exec/terminate` | Request | ❌ Stub | 终止进程 |
+| `process/start` | Request | ❌ Stub | 测试中使用的方法 |
+
+### 命令行接口
+
+```bash
+# 启动执行服务器
+codex-exec-server --listen ws://127.0.0.1:8080
+
+# 使用默认配置（随机端口）
+codex-exec-server
+```
+
+---
 
 ## 关键代码路径与文件引用
 
-### 核心文件
+### 核心文件结构
 
-| 文件 | 职责 | 关键函数/结构 |
-|------|------|---------------|
-| `handler.rs` | 业务逻辑处理器 | `ExecServerHandler`, `initialize()`, `initialized()` |
-| `processor.rs` | 消息处理与分发 | `run_connection()`, `dispatch_request()`, `handle_notification()` |
-| `jsonrpc.rs` | JSON-RPC 工具函数 | `invalid_request()`, `method_not_found()`, `response_message()` |
-| `transport.rs` | WebSocket 传输层 | `run_transport()`, `run_websocket_listener()`, `parse_listen_url()` |
-| `transport_tests.rs` | URL 解析单元测试 | `parse_listen_url_*` 测试函数 |
+```
+codex-rs/exec-server/src/server/
+├── handler.rs           # ExecServerHandler 实现
+├── jsonrpc.rs           # JSON-RPC 工具函数
+├── processor.rs         # 连接处理和请求分发
+├── transport.rs         # WebSocket 传输层
+└── transport_tests.rs   # 传输层单元测试
+```
 
-### 依赖文件
+### 关键代码引用
 
-| 文件 | 依赖关系 |
-|------|----------|
-| `../connection.rs` | 提供 `JsonRpcConnection`, `JsonRpcConnectionEvent` |
-| `../protocol.rs` | 提供 `INITIALIZE_METHOD`, `INITIALIZED_METHOD`, `InitializeParams` |
-| `../server.rs` | 模块聚合与公共导出 |
-| `../lib.rs` | crate 根，导出 `run_main`, `run_main_with_listen_url` |
+| 功能 | 文件 | 行号范围 |
+|------|------|----------|
+| 服务器启动入口 | `server.rs` | 10-17 |
+| WebSocket 监听 | `transport.rs` | 49-82 |
+| URL 解析 | `transport.rs` | 35-47 |
+| 连接处理循环 | `processor.rs` | 18-61 |
+| 消息分发 | `processor.rs` | 63-121 |
+| initialize 处理 | `handler.rs` | 24-31 |
+| initialized 处理 | `handler.rs` | 33-39 |
+| 错误构造 | `jsonrpc.rs` | 8-46 |
+
+### 依赖模块
+
+```
+server/
+    ├── 依赖: crate::connection::JsonRpcConnection
+    ├── 依赖: crate::protocol::{InitializeParams, InitializeResponse, INITIALIZE_METHOD, INITIALIZED_METHOD}
+    ├── 依赖: crate::server::jsonrpc::{invalid_params, invalid_request, method_not_found, response_message}
+    └── 外部依赖: codex_app_server_protocol::{JSONRPCMessage, JSONRPCRequest, JSONRPCNotification, JSONRPCError, JSONRPCErrorError, JSONRPCResponse, RequestId}
+```
+
+---
+
+## 依赖与外部交互
+
+### 内部依赖
+
+| 模块 | 路径 | 用途 |
+|------|------|------|
+| `connection` | `../connection.rs` | WebSocket/stdio 连接抽象 |
+| `protocol` | `../protocol.rs` | 协议常量和数据结构 |
+| `client` | `../client.rs` | 通过 LocalBackend 使用 handler |
 
 ### 外部依赖
 
 | Crate | 用途 |
 |-------|------|
-| `codex_app_server_protocol` | JSON-RPC 消息类型定义（`JSONRPCMessage`, `JSONRPCRequest`, 等） |
-| `tokio` | 异步运行时、TCP 监听、spawn 任务 |
+| `codex-app-server-protocol` | JSON-RPC 消息类型定义 |
+| `tokio` | 异步运行时和 TCP/WebSocket |
 | `tokio-tungstenite` | WebSocket 服务器实现 |
 | `serde_json` | JSON 序列化/反序列化 |
-| `tracing` | 日志记录 |
+| `tracing` | 日志和追踪 |
 
-### 代码调用链
+### 与客户端的交互
 
 ```
-codex-exec-server (bin)
-    ↓
-run_main_with_listen_url (lib)
-    ↓
-transport::run_transport
-    ↓
-run_websocket_listener
-    ↓ (per connection)
-JsonRpcConnection::from_websocket
-    ↓
-processor::run_connection
-    ↓
-handle_connection_message
-    ↓ (Request)
-dispatch_request
-    ↓
-ExecServerHandler::initialize
+┌─────────────────┐      WebSocket       ┌─────────────────────────┐
+│   ExecServer    │◄────────────────────►│      ExecServerClient   │
+│   (server/)     │   JSON-RPC 消息      │      (client.rs)        │
+└─────────────────┘                      └─────────────────────────┘
+         │                                         │
+         │  1. initialize 请求                      │
+         │◄─────────────────────────────────────────│
+         │  2. initialize 响应                      │
+         │──────────────────────────────────────────►│
+         │  3. initialized 通知                     │
+         │◄─────────────────────────────────────────│
+         │                                         │
+         │  4. 后续 RPC 调用（当前返回错误）        │
+         │◄─────────────────────────────────────────│
+         │  5. 错误响应                             │
+         │──────────────────────────────────────────►│
 ```
 
-## 依赖与外部交互
+### 与 LocalBackend 的交互
 
-### 上游依赖（调用方）
+```rust
+// client/local_backend.rs
+pub(super) struct LocalBackend {
+    handler: Arc<ExecServerHandler>,
+}
 
-1. **codex-exec-server 二进制** (`src/bin/codex-exec-server.rs`)
-   - CLI 入口，解析 `--listen` 参数
-   - 调用 `run_main_with_listen_url`
+impl LocalBackend {
+    pub(super) async fn initialize(&self) -> Result<InitializeResponse, ExecServerError> {
+        self.handler.initialize().map_err(...)
+    }
+    
+    pub(super) async fn initialized(&self) -> Result<(), ExecServerError> {
+        self.handler.initialized().map_err(...)
+    }
+}
+```
 
-2. **集成测试** (`tests/`)
-   - `initialize.rs`: 测试初始化握手
-   - `websocket.rs`: 测试 WebSocket 连接与错误处理
-   - `process.rs`: 测试 process/start stub 行为
-
-### 下游依赖（被调用方）
-
-1. **codex_app_server_protocol crate**
-   - 共享 JSON-RPC 类型定义
-   - 确保与 app-server 协议兼容
-
-2. **connection 模块** (`src/connection.rs`)
-   - 提供 WebSocket/stdio 连接抽象
-   - 处理底层 I/O 与消息解析
-
-### 横向交互
-
-1. **与 app-server 的关系**
-   - exec-server 是独立的执行服务器进程
-   - 与 app-server 通过 JSON-RPC 协议通信
-   - 共享 `codex_app_server_protocol` 定义的消息格式
-
-2. **与客户端的关系**
-   - 支持远程 WebSocket 客户端（如 `ExecServerClient`）
-   - 支持进程内本地后端（`LocalBackend`）
+---
 
 ## 风险、边界与改进建议
 
-### 已知风险
+### 当前风险
 
-1. **Stub 实现限制**
-   - 当前仅实现初始化握手，业务功能（process/start、command/exec）未实现
-   - 客户端调用未实现方法会收到明确的错误响应（`processor.rs:107-108`）
+1. **功能不完整**：当前仅为 stub 实现，大部分方法返回 `METHOD_NOT_FOUND` 错误
+   - 影响：无法实际执行进程管理功能
+   - 缓解：README 明确说明这是 intentional，完整实现在后续 PR
 
-2. **并发安全**
-   - `ExecServerHandler` 使用 `AtomicBool` 确保初始化状态线程安全
-   - 但当前实现简单，未来扩展需考虑更复杂的状态管理
+2. **无认证机制**：WebSocket 连接无身份验证
+   - 影响：任何能连接到端口的客户端都可使用服务
+   - 建议：添加 token-based 认证或 TLS 客户端证书
 
-3. **错误处理边界**
-   - 格式错误消息不会中断连接（符合预期）
-   - 协议错误（如收到 Response）会中断连接
+3. **单连接状态管理**：`ExecServerHandler` 每个连接独立，无全局状态
+   - 影响：无法跨连接共享进程状态
+   - 注意：这可能是设计意图（隔离性）
 
-4. **传输层限制**
-   - 仅支持 WebSocket 传输
-   - stdio 传输仅在测试中使用
+4. **错误处理粒度**：畸形消息仅记录警告，可能掩盖问题
+   - 代码：`processor.rs:41-49`
 
-### 边界条件
+### 边界情况
 
-1. **初始化状态机**
-   - 必须严格遵循 `initialize` → `initialized` 顺序
-   - 重复调用 `initialize` 返回错误（`-32600`）
-   - 先收到 `initialized` 通知返回错误
+1. **重复 initialize**：
+   - 行为：返回 `INVALID_REQUEST` 错误
+   - 代码：`handler.rs:25-28`
 
-2. **连接生命周期**
-   - 每个连接独立 spawn 任务，无全局连接管理
-   - 连接断开时自动清理资源（通过 `Drop`）
+2. **initialized 在 initialize 之前**：
+   - 行为：返回协议错误，关闭连接
+   - 代码：`handler.rs:34-36`
 
-3. **消息大小限制**
-   - 依赖 `tokio-tungstenite` 的默认配置
-   - 无显式消息大小限制
+3. **畸形 JSON**：
+   - 行为：返回错误响应（id=-1），保持连接
+   - 代码：`processor.rs:41-49`
+
+4. **意外的客户端响应**：
+   - 行为：协议错误，关闭连接
+   - 代码：`processor.rs:73-80`
+
+5. **WebSocket 关闭**：
+   - 行为：断开事件触发，清理 handler
+   - 代码：`processor.rs:51-56`, `handler.rs:22`
 
 ### 改进建议
 
-1. **功能扩展**
-   - 实现 `process/start` 方法，支持进程启动
-   - 实现 `command/exec` 方法，支持命令执行
-   - 添加健康检查/心跳机制
+1. **完善进程管理实现**：
+   - 实现 `command/exec`、`command/exec/write`、`command/exec/terminate`
+   - 集成 `codex-utils-pty` 进行 PTY 管理
 
-2. **监控与可观测性**
-   - 添加连接数指标
-   - 添加请求延迟 histogram
-   - 添加方法调用计数器
+2. **增强安全性**：
+   - 添加连接认证（token 或 mTLS）
+   - 实现访问控制列表（ACL）
+   - 添加速率限制
 
-3. **安全增强**
-   - 添加连接认证机制
-   - 实现速率限制
-   - 添加请求大小限制
+3. **可观测性**：
+   - 添加 metrics 导出（连接数、请求数、错误率）
+   - 完善 tracing span 和上下文传播
 
-4. **协议扩展**
-   - 考虑支持 Server-Sent Events (SSE) 作为替代传输
-   - 添加批量请求支持（JSON-RPC batch）
+4. **配置管理**：
+   - 支持配置文件（TOML/YAML）
+   - 可配置日志级别、监听地址、超时
 
-5. **代码结构优化**
-   - 将 `dispatch_request` 中的方法路由提取为宏或 trait 系统
-   - 添加中间件机制（认证、日志、metrics）
+5. **测试覆盖**：
+   - 添加集成测试（当前仅有单元测试）
+   - 测试并发连接场景
+   - 测试错误恢复路径
 
-6. **测试覆盖**
-   - 添加并发初始化测试
-   - 添加大消息压力测试
-   - 添加连接断开边界测试
+6. **文档完善**：
+   - API 文档（OpenAPI/JSON Schema）
+   - 部署和运维指南
 
-## 参考文档
+---
 
-- [app-server-protocol JSON-RPC 定义](../../app-server-protocol/src/jsonrpc_lite.rs)
-- [app-server 协议文档](../../app-server/README.md)
-- [exec-server 集成测试](../../tests/)
-- [AGENTS.md 项目规范](../../../../AGENTS.md)
+## 总结
+
+`codex-rs/exec-server/src/server` 是一个设计清晰的 JSON-RPC 服务器框架，实现了：
+
+1. **清晰的模块划分**：传输层、处理层、业务逻辑层分离
+2. **标准的协议实现**：遵循 JSON-RPC 2.0 规范
+3. **健壮的连接管理**：支持多客户端并发连接
+4. **完善的错误处理**：标准错误码，连接保持策略
+
+当前状态为**基础框架阶段**，核心进程管理功能待实现。代码质量高，遵循 Rust 最佳实践，具备良好的扩展性。
+
+---
+
+*研究日期：2026-03-21*
+*研究范围：codex-rs/exec-server/src/server 目录及其直接依赖*
