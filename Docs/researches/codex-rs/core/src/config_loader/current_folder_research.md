@@ -1,141 +1,45 @@
-# DIR codex-rs/core/src/config_loader 深度研究
+# DIR codex-rs/core/src/config_loader 研究文档
 
-## 1. 场景与职责
+## 概述
 
-`codex-rs/core/src/config_loader` 是 Codex 项目的**配置加载与管理层**的核心模块，负责从多个来源加载、合并和管理配置数据。该模块实现了**分层配置架构**，支持从系统级到项目级的多层级配置叠加，同时强制执行管理员定义的安全约束（requirements）。
+`config_loader` 是 Codex 核心库的配置加载模块，负责从多个配置源（用户配置、CLI覆盖、托管配置、MDM托管偏好设置等）加载和合并配置层，生成有效的合并配置并提供每键来源元数据。
+
+---
+
+## 场景与职责
 
 ### 核心职责
 
-1. **多源配置加载**：从系统目录、用户主目录、项目目录（`.codex/`）、CLI 参数、MDM 管理配置等多个来源加载配置
-2. **配置分层合并**：实现配置优先级机制，高层配置覆盖低层配置
-3. **项目信任管理**：基于项目信任级别（trusted/untrusted）控制项目级配置的启用/禁用
-4. **约束强制执行**：加载并执行 `requirements.toml` 中定义的管理员约束
-5. **配置溯源追踪**：记录每个配置项的来源，支持配置冲突诊断
-6. **云配置集成**：支持从云端加载托管配置要求
+1. **多源配置加载**：从多个配置源加载配置，包括：
+   - Cloud 管理云需求 (`cloud_requirements`)
+   - macOS MDM 托管偏好设置（仅 macOS）
+   - 系统级 `requirements.toml` 和 `config.toml`
+   - 用户级 `~/.codex/config.toml`
+   - 项目级 `.codex/config.toml`（从项目根目录到 CWD 的层级）
+   - CLI/会话覆盖（`--config` 标志、UI模型选择器等）
+   - 遗留的 `managed_config.toml`
 
-### 架构定位
+2. **配置层合并**：按优先级顺序合并配置层，高优先级层覆盖低优先级层
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      ConfigBuilder (config/mod.rs)               │
-│                         配置构建入口                             │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              load_config_layers_state (config_loader/mod.rs)     │
-│                    配置层加载主入口                              │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-        ┌───────────────────────┼───────────────────────┐
-        ▼                       ▼                       ▼
-┌───────────────┐      ┌───────────────┐      ┌───────────────┐
-│   layer_io    │      │    macos      │      │  codex-config │
-│  配置IO操作   │      │ MDM配置支持   │      │  配置状态管理  │
-└───────────────┘      └───────────────┘      └───────────────┘
-```
+3. **项目信任管理**：根据用户配置中的 `trust_level` 决定项目配置是否生效
+
+4. **路径解析**：将配置中的相对路径解析为绝对路径
+
+5. **配置要求强制执行**：加载并应用管理员强制要求的配置约束
+
+### 使用场景
+
+- **TUI/CLI 启动**：加载用户配置和项目配置
+- **App Server**：提供配置读取/写入服务
+- **测试**：通过 `LoaderOverrides` 注入测试配置
 
 ---
 
-## 2. 功能点目的
+## 功能点目的
 
-### 2.1 配置分层系统
+### 1. 配置层加载 (`load_config_layers_state`)
 
-| 层级 | 来源 | 优先级 | 说明 |
-|------|------|--------|------|
-| Cloud | 云端托管配置 | 最高 | 企业级强制约束 |
-| MDM | macOS 管理配置 | 高 | 设备管理策略 |
-| System | `/etc/codex/` | 中高 | 系统级默认配置 |
-| User | `~/.codex/config.toml` | 中 | 用户个人配置 |
-| Project | `.codex/config.toml` | 中高 | 项目级配置（受信任控制）|
-| Session Flags | CLI 参数 | 最高 | 运行时覆盖 |
-| Legacy Managed | `managed_config.toml` | 兼容 | 向后兼容旧配置 |
-
-### 2.2 项目信任机制
-
-```rust
-// ProjectTrustContext 核心结构
-struct ProjectTrustContext {
-    project_root: AbsolutePathBuf,           // 项目根目录
-    project_root_key: String,                // 项目标识键
-    repo_root_key: Option<String>,           // Git 仓库根键
-    projects_trust: HashMap<String, TrustLevel>, // 信任级别映射
-    user_config_file: AbsolutePathBuf,       // 用户配置文件
-}
-```
-
-信任级别：
-- `Trusted`：项目配置完全启用
-- `Untrusted`：项目配置被禁用（显式标记为不信任）
-- `None`：未知状态，配置被禁用（需用户手动信任）
-
-### 2.3 约束系统（Requirements）
-
-管理员可通过 `requirements.toml` 定义强制约束：
-
-```toml
-# 允许的审批策略
-allowed_approval_policies = ["never", "on-request"]
-
-# 允许的沙箱模式
-allowed_sandbox_modes = ["read-only", "workspace-write"]
-
-# 强制的数据驻留地
-enforce_residency = "us"
-
-# 功能开关要求
-[features]
-personality = true
-```
-
----
-
-## 3. 具体技术实现
-
-### 3.1 核心数据结构
-
-#### ConfigLayerEntry - 配置层条目
-
-```rust
-#[derive(Debug, Clone, PartialEq)]
-pub struct ConfigLayerEntry {
-    pub name: ConfigLayerSource,      // 配置来源标识
-    pub config: TomlValue,            // 配置内容（TOML 值）
-    pub raw_toml: Option<String>,     // 原始 TOML 文本（用于 MDM）
-    pub version: String,              // 配置版本指纹（SHA256）
-    pub disabled_reason: Option<String>, // 禁用原因（如不信任）
-}
-```
-
-#### ConfigLayerStack - 配置层栈
-
-```rust
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ConfigLayerStack {
-    layers: Vec<ConfigLayerEntry>,                    // 配置层列表（低→高优先级）
-    user_layer_index: Option<usize>,                  // 用户层索引
-    requirements: ConfigRequirements,                 // 强制约束
-    requirements_toml: ConfigRequirementsToml,        // 原始约束 TOML
-}
-```
-
-#### 配置来源枚举（ConfigLayerSource）
-
-```rust
-pub enum ConfigLayerSource {
-    Mdm { domain: String, key: String },           // MDM 管理配置
-    System { file: AbsolutePathBuf },              // 系统配置
-    User { file: AbsolutePathBuf },                // 用户配置
-    Project { dot_codex_folder: AbsolutePathBuf }, // 项目配置
-    SessionFlags,                                   // CLI 会话参数
-    LegacyManagedConfigTomlFromFile { file: AbsolutePathBuf },
-    LegacyManagedConfigTomlFromMdm,
-}
-```
-
-### 3.2 关键流程
-
-#### 配置加载主流程
+主入口函数，异步加载所有配置层并返回 `ConfigLayerStack`。
 
 ```rust
 pub async fn load_config_layers_state(
@@ -144,308 +48,383 @@ pub async fn load_config_layers_state(
     cli_overrides: &[(String, TomlValue)],
     overrides: LoaderOverrides,
     cloud_requirements: CloudRequirementsLoader,
-) -> io::Result<ConfigLayerStack> {
-    // 1. 加载云配置要求
-    // 2. 加载 macOS MDM 管理配置（如适用）
-    // 3. 加载系统 requirements.toml
-    // 4. 加载遗留 managed_config.toml
-    // 5. 构建 CLI 覆盖层
-    // 6. 加载系统 config.toml
-    // 7. 加载用户 config.toml
-    // 8. 加载项目级配置（基于信任上下文）
-    // 9. 合并所有层并返回 ConfigLayerStack
-}
+) -> io::Result<ConfigLayerStack>
 ```
 
-#### 项目配置加载流程
+**参数说明**：
+- `codex_home`: Codex 主目录（通常是 `~/.codex`）
+- `cwd`: 当前工作目录，用于加载项目级配置
+- `cli_overrides`: CLI 传递的配置覆盖（点分路径键值对）
+- `overrides`: 加载器覆盖（主要用于测试）
+- `cloud_requirements`: 云端配置要求加载器
 
-```rust
-async fn load_project_layers(
-    cwd: &AbsolutePathBuf,
-    project_root: &AbsolutePathBuf,
-    trust_context: &ProjectTrustContext,
-    codex_home: &Path,
-) -> io::Result<Vec<ConfigLayerEntry>> {
-    // 1. 从 cwd 向上遍历到 project_root
-    // 2. 查找每个目录下的 .codex/ 文件夹
-    // 3. 排除 codex_home 本身（避免重复加载）
-    // 4. 读取 .codex/config.toml
-    // 5. 根据信任上下文决定是否禁用该层
-    // 6. 解析相对路径为绝对路径
-}
-```
+### 2. 项目信任上下文 (`ProjectTrustContext`)
 
-#### 路径解析机制
+管理项目目录的信任状态，决定是否加载项目配置。
 
-```rust
-pub(crate) fn resolve_relative_paths_in_config_toml(
-    value_from_config_toml: TomlValue,
-    base_dir: &Path,
-) -> io::Result<TomlValue> {
-    // 使用序列化/反序列化往返方式：
-    // 1. 将 TomlValue 反序列化为 ConfigToml（触发 AbsolutePathBuf 解析）
-    // 2. AbsolutePathBufGuard 确保相对路径基于 base_dir 解析
-    // 3. 重新序列化为 TomlValue
-    // 4. copy_shape_from_original 保留原始字段结构
-}
-```
+**信任级别**：
+- `Trusted`: 完全信任，加载配置
+- `Untrusted`: 明确不信任，禁用配置
+- `None`: 未知状态，禁用配置
 
-### 3.3 约束系统实现
+### 3. 配置层来源 (`ConfigLayerSource`)
 
-#### Constrained<T> - 约束包装器
+标识配置层的来源，用于：
+- 确定优先级顺序
+- 显示配置来源信息
+- 版本控制和乐观并发
 
-```rust
-pub struct Constrained<T> {
-    value: T,
-    validator: Arc<dyn Fn(&T) -> ConstraintResult<()> + Send + Sync>,
-    normalizer: Option<Arc<dyn Fn(T) -> T + Send + Sync>>,
-}
+**来源类型**（按优先级从低到高）：
+1. `System` - 系统级配置
+2. `User` - 用户级配置 (`~/.codex/config.toml`)
+3. `Project` - 项目级配置 (`.codex/config.toml`)
+4. `SessionFlags` - CLI/会话覆盖
+5. `LegacyManagedConfigTomlFromFile` - 遗留托管配置文件
+6. `LegacyManagedConfigTomlFromMdm` - 遗留 MDM 托管配置
 
-impl<T: Send + Sync> Constrained<T> {
-    pub fn new(initial_value: T, validator: impl Fn(&T) -> ConstraintResult<()>) -> ConstraintResult<Self>;
-    pub fn allow_any(initial_value: T) -> Self;
-    pub fn set(&mut self, value: T) -> ConstraintResult<()>;
-    pub fn can_set(&self, candidate: &T) -> ConstraintResult<()>;
-}
-```
+### 4. macOS MDM 集成 (`macos.rs`)
 
-#### ConfigRequirements 结构
+通过 macOS CoreFoundation API 读取 MDM 托管偏好设置：
+- `config_toml_base64`: Base64 编码的配置 TOML
+- `requirements_toml_base64`: Base64 编码的要求 TOML
 
-```rust
-pub struct ConfigRequirements {
-    pub approval_policy: ConstrainedWithSource<AskForApproval>,
-    pub sandbox_policy: ConstrainedWithSource<SandboxPolicy>,
-    pub web_search_mode: ConstrainedWithSource<WebSearchMode>,
-    pub feature_requirements: Option<Sourced<FeatureRequirementsToml>>,
-    pub mcp_servers: Option<Sourced<BTreeMap<String, McpServerRequirement>>>,
-    pub exec_policy: Option<Sourced<RequirementsExecPolicy>>,
-    pub enforce_residency: ConstrainedWithSource<Option<ResidencyRequirement>>,
-    pub network: Option<Sourced<NetworkConstraints>>,
-}
-```
+### 5. 遗留配置支持
 
-### 3.4 配置合并算法
-
-```rust
-/// 递归合并 TOML 值，overlay 优先于 base
-pub fn merge_toml_values(base: &mut TomlValue, overlay: &TomlValue) {
-    if let (TomlValue::Table(overlay_table), TomlValue::Table(base_table)) = (overlay, &mut *base) {
-        for (key, value) in overlay_table {
-            if let Some(existing) = base_table.get_mut(key) {
-                merge_toml_values(existing, value);  // 递归合并子表
-            } else {
-                base_table.insert(key.clone(), value.clone());  // 插入新键
-            }
-        }
-    } else {
-        *base = overlay.clone();  // 非表类型直接覆盖
-    }
-}
-```
-
-### 3.5 CLI 覆盖层构建
-
-```rust
-pub fn build_cli_overrides_layer(cli_overrides: &[(String, TomlValue)]) -> TomlValue {
-    // 将点分路径转换为嵌套 TOML 结构
-    // 例如: ("mcp_servers.sentry.enabled", true) 
-    //       => { mcp_servers = { sentry = { enabled = true } } }
-}
-```
+支持遗留的 `managed_config.toml` 格式，将其转换为新的 `requirements.toml` 格式。
 
 ---
 
-## 4. 关键代码路径与文件引用
+## 具体技术实现
 
-### 4.1 模块文件结构
+### 关键流程
+
+#### 1. 配置层加载流程
+
+```
+load_config_layers_state
+├── 加载 Cloud Requirements
+├── 加载 macOS MDM Requirements (仅 macOS)
+├── 加载系统 requirements.toml
+├── 加载遗留 managed_config.toml 作为 requirements
+├── 构建 CLI 覆盖层
+├── 加载系统 config.toml
+├── 加载用户 config.toml (~/.codex/config.toml)
+├── 如果 cwd 存在:
+│   ├── 读取 project_root_markers 配置
+│   ├── 确定项目根目录
+│   ├── 构建 ProjectTrustContext
+│   └── 加载项目配置层 (从项目根到 cwd 的所有 .codex/config.toml)
+├── 添加 CLI 覆盖层
+└── 添加遗留 managed_config.toml 层
+```
+
+#### 2. 项目配置加载流程
+
+```
+load_project_layers
+├── 从 cwd 向上遍历到 project_root
+├── 对每个目录检查 .codex/ 文件夹
+├── 跳过与 codex_home 相同的目录（避免重复加载）
+├── 读取 .codex/config.toml
+├── 解析并验证 TOML
+├── 解析相对路径
+└── 根据信任状态创建 ConfigLayerEntry
+    ├── 信任: 正常层
+    └── 不信任: 禁用层（保留配置但不生效）
+```
+
+#### 3. 路径解析流程
+
+```
+resolve_relative_paths_in_config_toml
+├── 使用 AbsolutePathBufGuard 设置基础目录
+├── 将 toml::Value 反序列化为 ConfigToml（解析相对路径）
+├── 将 ConfigToml 序列化回 toml::Value
+└── copy_shape_from_original 保留原始结构
+```
+
+### 数据结构
+
+#### `ConfigLayerEntry`
+
+```rust
+pub struct ConfigLayerEntry {
+    pub name: ConfigLayerSource,      // 配置来源
+    pub config: TomlValue,            // 配置内容
+    pub raw_toml: Option<String>,     // 原始 TOML 文本
+    pub version: String,              // 版本指纹
+    pub disabled_reason: Option<String>, // 禁用原因
+}
+```
+
+#### `ConfigLayerStack`
+
+```rust
+pub struct ConfigLayerStack {
+    layers: Vec<ConfigLayerEntry>,           // 配置层（低优先级到高优先级）
+    user_layer_index: Option<usize>,         // 用户层索引
+    requirements: ConfigRequirements,        // 强制要求
+    requirements_toml: ConfigRequirementsToml, // 原始要求 TOML
+}
+```
+
+#### `ProjectTrustContext`
+
+```rust
+struct ProjectTrustContext {
+    project_root: AbsolutePathBuf,
+    project_root_key: String,
+    repo_root_key: Option<String>,
+    projects_trust: HashMap<String, TrustLevel>,
+    user_config_file: AbsolutePathBuf,
+}
+```
+
+### 关键算法
+
+#### 项目根目录查找
+
+```rust
+async fn find_project_root(
+    cwd: &AbsolutePathBuf,
+    project_root_markers: &[String],
+) -> io::Result<AbsolutePathBuf>
+```
+
+- 如果 `project_root_markers` 为空，返回 `cwd`
+- 否则从 `cwd` 向上遍历，查找包含任何标记文件的目录
+- 默认标记：`[".git"]`
+
+#### 配置合并
+
+```rust
+pub fn merge_toml_values(base: &mut TomlValue, overlay: &TomlValue)
+```
+
+递归合并两个 TOML 值，overlay 的值覆盖 base 的值。
+
+#### 版本指纹
+
+```rust
+pub fn version_for_toml(value: &TomlValue) -> String
+```
+
+计算 TOML 值的稳定哈希，用于乐观并发控制。
+
+---
+
+## 关键代码路径与文件引用
+
+### 模块结构
 
 ```
 codex-rs/core/src/config_loader/
-├── mod.rs           # 主模块，包含 load_config_layers_state 和项目信任逻辑
-├── layer_io.rs      # 配置层 IO 操作（managed_config 加载）
-├── macos.rs         # macOS MDM 管理配置支持
+├── mod.rs           # 主模块，配置层加载逻辑
+├── layer_io.rs      # 配置层 IO 操作（读取 managed_config.toml）
+├── macos.rs         # macOS MDM 集成
 ├── tests.rs         # 单元测试和集成测试
 └── README.md        # 模块文档
 ```
 
-### 4.2 依赖的 codex-config crate
+### 关键函数
 
-```
-codex-rs/config/src/
-├── lib.rs                    # 公共导出
-├── state.rs                  # ConfigLayerEntry, ConfigLayerStack
-├── config_requirements.rs    # ConfigRequirements, RequirementSource
-├── constraint.rs             # Constrained<T>, ConstraintError
-├── merge.rs                  # merge_toml_values
-├── fingerprint.rs            # version_for_toml, record_origins
-├── diagnostics.rs            # ConfigError, 错误格式化
-├── overrides.rs              # build_cli_overrides_layer
-├── cloud_requirements.rs     # CloudRequirementsLoader
-└── requirements_exec_policy.rs # 执行策略规则
-```
-
-### 4.3 关键函数路径
-
-| 功能 | 文件 | 函数 |
+| 函数 | 文件 | 描述 |
 |------|------|------|
-| 配置加载入口 | `mod.rs` | `load_config_layers_state()` |
-| 项目层加载 | `mod.rs` | `load_project_layers()` |
-| 信任上下文构建 | `mod.rs` | `project_trust_context()` |
-| 项目根查找 | `mod.rs` | `find_project_root()` |
-| 路径解析 | `mod.rs` | `resolve_relative_paths_in_config_toml()` |
-| 托管配置加载 | `layer_io.rs` | `load_config_layers_internal()` |
-| MDM 配置加载 | `macos.rs` | `load_managed_admin_config_layer()` |
-| 配置合并 | `codex-config/merge.rs` | `merge_toml_values()` |
-| 约束验证 | `codex-config/constraint.rs` | `Constrained::set()` |
-| 版本指纹 | `codex-config/fingerprint.rs` | `version_for_toml()` |
-| 错误诊断 | `codex-config/diagnostics.rs` | `config_error_from_toml()` |
+| `load_config_layers_state` | `mod.rs:114` | 主入口，加载所有配置层 |
+| `load_project_layers` | `mod.rs:792` | 加载项目级配置层 |
+| `project_trust_context` | `mod.rs:670` | 构建项目信任上下文 |
+| `resolve_relative_paths_in_config_toml` | `mod.rs:714` | 解析配置中的相对路径 |
+| `load_config_toml_for_required_layer` | `mod.rs:309` | 加载必需的配置层 |
+| `load_requirements_toml` | `mod.rs:349` | 加载 requirements.toml |
+| `load_managed_admin_config_layer` | `macos.rs:31` | 加载 MDM 托管配置 |
+| `load_managed_admin_requirements_toml` | `macos.rs:64` | 加载 MDM 托管要求 |
+| `read_config_from_path` | `layer_io.rs:91` | 从路径读取配置 |
 
-### 4.4 配置层优先级顺序
+### 常量定义
 
-```rust
-// mod.rs:150-300 配置层加载顺序（低→高优先级）
-1. Cloud requirements (约束)
-2. macOS MDM requirements (约束)
-3. System requirements.toml (约束)
-4. Legacy managed_config.toml (约束)
-5. System config.toml
-6. User config.toml (~/.codex/config.toml)
-7. Project layers (.codex/config.toml，从根到 cwd)
-8. CLI overrides (SessionFlags)
-9. Legacy managed_config.toml (配置值)
-10. MDM managed preferences (配置值)
-```
+| 常量 | 文件 | 描述 |
+|------|------|------|
+| `SYSTEM_CONFIG_TOML_FILE_UNIX` | `mod.rs:65` | Unix 系统配置路径 `/etc/codex/config.toml` |
+| `CODEX_MANAGED_CONFIG_SYSTEM_PATH` | `layer_io.rs:16` | 托管配置路径 `/etc/codex/managed_config.toml` |
+| `DEFAULT_PROJECT_ROOT_MARKERS` | `mod.rs:70` | 默认项目根标记 `[".git"]` |
+| `MANAGED_PREFERENCES_APPLICATION_ID` | `macos.rs:14` | MDM 应用 ID `com.openai.codex` |
 
 ---
 
-## 5. 依赖与外部交互
+## 依赖与外部交互
 
-### 5.1 内部依赖
+### 内部依赖
 
-| Crate/Module | 用途 |
-|--------------|------|
-| `codex-config` | 配置状态管理、约束系统、合并逻辑 |
-| `codex_app_server_protocol` | ConfigLayerSource, ConfigLayerMetadata |
-| `codex_protocol` | SandboxMode, TrustLevel, AskForApproval 等类型 |
-| `codex_utils_absolute_path` | AbsolutePathBuf, 路径解析守卫 |
-| `crate::config::ConfigToml` | 配置结构定义 |
-| `crate::git_info` | 解析 Git 仓库根目录 |
+#### `codex-config` crate
 
-### 5.2 外部依赖
+提供基础配置类型和功能：
+- `ConfigLayerEntry`, `ConfigLayerStack` - 配置层数据结构
+- `ConfigRequirements`, `ConfigRequirementsToml` - 配置要求
+- `LoaderOverrides` - 加载器覆盖
+- `merge_toml_values` - TOML 合并
+- `version_for_toml` - 版本指纹
+- 错误处理和诊断
+
+#### `codex_app_server_protocol`
+
+提供协议类型：
+- `ConfigLayerSource` - 配置层来源枚举
+- `ConfigLayer`, `ConfigLayerMetadata` - API 类型
+
+#### `codex_protocol`
+
+提供配置类型：
+- `SandboxMode`, `TrustLevel` - 枚举类型
+- `AskForApproval` - 审批策略
+
+#### `codex_utils_absolute_path`
+
+提供绝对路径处理：
+- `AbsolutePathBuf` - 绝对路径缓冲区
+- `AbsolutePathBufGuard` - 路径解析上下文
+
+### 外部依赖
 
 | Crate | 用途 |
 |-------|------|
-| `toml` | TOML 解析和序列化 |
 | `tokio` | 异步文件 IO |
-| `serde` | 配置结构反序列化 |
-| `dunce` | 跨平台路径规范化 |
-| `sha2` | 配置版本指纹计算 |
-| `core-foundation` (macOS) | MDM 管理配置读取 |
-| `windows-sys` (Windows) | 已知文件夹路径解析 |
+| `toml` | TOML 解析和序列化 |
+| `serde` | 序列化/反序列化 |
+| `dunce` | 路径规范化 |
+| `core-foundation` (macOS) | MDM 偏好设置读取 |
+| `base64` | MDM 配置解码 |
+| `windows-sys` (Windows) | 已知文件夹路径 |
 
-### 5.3 调用方分析
+### 系统交互
 
-```rust
-// 主要调用方：
-1. crate::config::ConfigBuilder::build()          // 配置构建主入口
-2. crate::config::load_global_mcp_servers()       // 全局 MCP 服务器加载
-3. crate::config::load_config_as_toml_with_cli_overrides() // 配置加载（旧接口）
-4. crate::config::service::ConfigService          // 配置服务 API
-5. crate::skills::manager::SkillsManager          // 技能管理器
-6. crate::network_proxy_loader::load_network_proxy_config() // 网络代理配置
-```
+#### 文件系统
+- 读取 `/etc/codex/config.toml`
+- 读取 `/etc/codex/requirements.toml`
+- 读取 `/etc/codex/managed_config.toml`
+- 读取 `~/.codex/config.toml`
+- 读取项目目录下的 `.codex/config.toml`
 
----
+#### macOS MDM
+- 使用 `CFPreferencesCopyAppValue` API
+- 读取 `com.openai.codex` 域的偏好设置
 
-## 6. 风险、边界与改进建议
-
-### 6.1 已知风险
-
-#### 1. 配置解析失败处理
-- **风险**：项目配置解析错误时，如果项目被标记为信任，会返回错误；如果不信任，则静默忽略
-- **代码位置**：`mod.rs:837-858`
-- **建议**：考虑添加警告日志，即使在不信任情况下也提示配置存在语法错误
-
-#### 2. 路径解析的序列化往返
-- **风险**：`resolve_relative_paths_in_config_toml` 使用序列化/反序列化往返，可能丢失 TOML 注释和格式
-- **代码位置**：`mod.rs:714-737`
-- **缓解**：`copy_shape_from_original` 函数保留原始字段结构
-
-#### 3. MDM 配置加载的线程阻塞
-- **风险**：macOS MDM 配置读取使用 `task::spawn_blocking`，可能因系统调用阻塞
-- **代码位置**：`macos.rs:43-54`
-- **缓解**：已使用 spawn_blocking，但需监控超时情况
-
-#### 4. 项目信任键冲突
-- **风险**：项目路径字符串键可能因路径规范化不一致导致信任判断失败
-- **代码位置**：`mod.rs:598-631`
-- **建议**：统一使用规范化路径作为键
-
-### 6.2 边界情况
-
-| 场景 | 行为 |
-|------|------|
-| `codex_home` 位于项目树内 | 排除加载，避免重复（`mod.rs:833-835`）|
-| 空的 `project_root_markers` | 禁用根检测，使用 cwd 作为项目根（`mod.rs:772-774`）|
-| 多个用户配置层 | 验证失败，返回错误（`state.rs:293-300`）|
-| 项目层顺序错误 | 验证失败，返回错误（`state.rs:307-324`）|
-| Cloud requirements 加载失败 | 失败关闭（fail closed），返回错误（`tests.rs:737-764`）|
-
-### 6.3 改进建议
-
-#### 1. 配置缓存机制
-- **现状**：每次调用都重新读取所有配置文件
-- **建议**：添加基于文件修改时间的缓存，提升性能
-
-#### 2. 配置热重载
-- **现状**：配置在启动时加载后固定
-- **建议**：支持配置变更监听和动态重载（已部分支持通过 ConfigService）
-
-#### 3. 更细粒度的信任控制
-- **现状**：项目级信任控制（trusted/untrusted）
-- **建议**：支持目录级或配置项级的信任控制
-
-#### 4. 配置验证增强
-- **现状**：基础 TOML 结构和类型验证
-- **建议**：添加配置语义验证（如路径存在性检查、URL 格式验证）
-
-#### 5. 错误信息改进
-- **现状**：配置错误显示文件和行号
-- **建议**：添加配置项来源链（如 "value X from file A overrides value Y from file B"）
-
-#### 6. 测试覆盖
-- **现状**：已有较全面的单元测试（`tests.rs` 1700+ 行）
-- **建议**：添加更多边界情况测试，如符号链接、权限问题、并发加载
-
-### 6.4 安全考虑
-
-1. **路径遍历防护**：所有路径解析通过 `AbsolutePathBuf` 确保绝对路径，防止目录遍历
-2. **约束强制执行**：requirements 层优先加载，确保用户无法覆盖管理员约束
-3. **不信任项目隔离**：不信任项目的配置被标记为 disabled，不参与 effective_config 计算
-4. **敏感信息处理**：MDM 配置的 raw_toml 可选保留，支持审计但不强制存储
+#### Windows
+- 使用 `SHGetKnownFolderPath` 获取 `FOLDERID_ProgramData`
+- 配置路径：`%ProgramData%\OpenAI\Codex\config.toml`
 
 ---
 
-## 7. 测试概览
+## 风险、边界与改进建议
 
-测试文件 `tests.rs` 包含以下测试类别：
+### 已知风险
 
-| 测试类别 | 测试数量 | 关键测试 |
-|----------|----------|----------|
-| CLI 覆盖 | 3 | `cli_overrides_resolve_relative_paths_against_cwd` |
-| 错误处理 | 3 | `returns_config_error_for_invalid_user_config_toml` |
-| 配置合并 | 2 | `merges_managed_config_layer_on_top` |
-| 空配置处理 | 1 | `returns_empty_when_all_layers_missing` |
-| MDM 配置 | 3 | `managed_preferences_take_highest_precedence` |
-| 云配置 | 4 | `cloud_requirements_take_precedence_over_mdm_requirements` |
-| 项目层 | 6 | `project_layers_prefer_closest_cwd`, `project_layers_disabled_when_untrusted` |
-| 执行策略 | 8 | `requirements_exec_policy_tests` 模块 |
+#### 1. 信任绕过风险
+
+**问题**：项目配置的信任检查依赖于用户配置中的 `projects` 映射。如果用户配置被篡改，可能导致不受信任的项目配置被加载。
+
+**缓解**：
+- 用户配置位于用户主目录，通常只有该用户可写
+- 系统级要求可以限制某些配置选项
+
+#### 2. 路径遍历风险
+
+**问题**：配置中的相对路径如果未正确解析，可能导致路径遍历攻击。
+
+**缓解**：
+- 使用 `AbsolutePathBuf` 确保所有路径都是绝对路径
+- `resolve_relative_paths_in_config_toml` 函数确保相对路径正确解析
+
+#### 3. MDM 配置注入（仅 macOS）
+
+**问题**：MDM 配置通过 Base64 编码传输，如果编码或解析失败，可能导致配置加载失败。
+
+**缓解**：
+- 详细的错误日志
+- 失败时返回 `None` 而不是 panic
+
+### 边界情况
+
+#### 1. 循环依赖
+
+项目配置加载不会检测循环符号链接，可能导致无限循环。
+
+#### 2. 大配置文件
+
+非常大的 TOML 文件可能导致内存问题，没有大小限制检查。
+
+#### 3. 并发修改
+
+配置在加载过程中可能被外部修改，导致不一致状态。
+
+### 改进建议
+
+#### 1. 性能优化
+
+- **问题**：每次加载都重新读取所有配置文件
+- **建议**：添加文件系统监视和缓存机制
+
+#### 2. 错误处理
+
+- **问题**：某些错误信息不够详细
+- **建议**：添加更多上下文信息，如文件路径、行号等
+
+#### 3. 配置验证
+
+- **问题**：配置验证在合并后进行，可能导致难以诊断的问题
+- **建议**：添加每层的独立验证
+
+#### 4. 测试覆盖
+
+- **问题**：某些边界情况（如权限错误、损坏的 TOML）测试不足
+- **建议**：添加更多负面测试用例
+
+#### 5. 文档
+
+- **问题**：某些内部函数缺乏文档
+- **建议**：为所有公共和内部函数添加文档注释
+
+#### 6. 跨平台一致性
+
+- **问题**：Windows 和 Unix 的配置路径逻辑略有不同
+- **建议**：统一跨平台行为，或明确文档化差异
 
 ---
 
-## 8. 相关文档
+## 测试
 
-- `README.md`：模块使用文档和 API 示例
-- `codex-rs/config/README.md`：codex-config crate 文档
-- `docs/`：用户级配置文档
-- `AGENTS.md`：项目级代理配置指南
+测试文件位于 `tests.rs`，包含：
+
+### 单元测试
+
+- `cli_overrides_resolve_relative_paths_against_cwd` - CLI 覆盖路径解析
+- `returns_config_error_for_invalid_user_config_toml` - 无效用户配置错误
+- `returns_config_error_for_invalid_managed_config_toml` - 无效托管配置错误
+- `returns_config_error_for_schema_error_in_user_config` - 模式错误
+- `merges_managed_config_layer_on_top` - 托管配置合并
+- `returns_empty_when_all_layers_missing` - 空配置处理
+
+### 集成测试
+
+- `managed_preferences_take_highest_precedence` (macOS) - MDM 优先级
+- `managed_preferences_requirements_are_applied` (macOS) - MDM 要求应用
+- `cloud_requirements_take_precedence_over_mdm_requirements` - 云端要求优先级
+- `project_layers_prefer_closest_cwd` - 项目层优先级
+- `project_layers_disabled_when_untrusted_or_unknown` - 信任检查
+
+### Exec Policy 测试
+
+- `requirements_exec_policy_tests` 模块测试命令执行策略的解析和应用
+
+---
+
+## 总结
+
+`config_loader` 是一个复杂但设计良好的配置管理系统，通过分层架构和信任机制，实现了灵活而安全的配置加载。主要特点：
+
+1. **分层配置**：支持从系统到项目的多级配置
+2. **信任管理**：项目配置需要显式信任才能生效
+3. **路径安全**：所有路径都解析为绝对路径
+4. **要求强制**：管理员可以通过 requirements.toml 强制配置约束
+5. **跨平台**：支持 Unix、macOS 和 Windows
+
+该模块是 Codex 核心功能的基础，为整个应用程序提供一致且安全的配置管理。
