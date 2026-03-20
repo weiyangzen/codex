@@ -5,7 +5,7 @@ export PATH="/home/sansha/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/c
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT="$(basename "$REPO")"
-CODEX_BIN="${CODEX_BIN:-/home/sansha/.nvm/versions/node/v24.14.0/bin/codex}"
+KIMI_BIN="${KIMI_BIN:-/home/sansha/.local/bin/kimi}"
 LOG_DIR="$REPO/.cron"
 LOG_FILE="$LOG_DIR/research_guard.log"
 STATE_FILE="$LOG_DIR/research_guard.state"
@@ -13,12 +13,15 @@ BLOCK_FILE="$LOG_DIR/research_guard.block_count"
 LOCK_FILE="/tmp/${PROJECT}_research_guard.lock"
 CHECKLIST_FILE="$REPO/Docs/researches/blueprint_checklist.md"
 AUTO_CLEANUP_ON_COMPLETE="${AUTO_CLEANUP_ON_COMPLETE:-0}"
-CODEX_EXEC_TIMEOUT_SECONDS="${CODEX_EXEC_TIMEOUT_SECONDS:-5400}"
+KIMI_EXEC_TIMEOUT_SECONDS="${KIMI_EXEC_TIMEOUT_SECONDS:-${CODEX_EXEC_TIMEOUT_SECONDS:-5400}}"
 AUTO_PUSH_ON_CHECKPOINT="${AUTO_PUSH_ON_CHECKPOINT:-0}"
 MAX_BATCH_BYTES="${MAX_BATCH_BYTES:-102400}"
 TMUX_WRAP_ENABLED="${TMUX_WRAP_ENABLED:-1}"
 TMUX_SESSION_NAME="${TMUX_SESSION_NAME:-$PROJECT}"
 WORKER_MODE="${RESEARCH_GUARD_WORKER:-0}"
+KIMI_MODEL="${KIMI_MODEL:-k2p5}"
+KIMI_KEYS_FILE="${KIMI_KEYS_FILE:-$HOME/kimi_keys.txt}"
+KIMI_KEY_INDEX_FILE="$LOG_DIR/research_guard.kimi_key_index"
 
 mkdir -p "$LOG_DIR" "$REPO/Docs/researches"
 
@@ -26,6 +29,101 @@ ts() { date '+%F %T %z'; }
 log() { echo "[$(ts)] $*" >> "$LOG_FILE"; }
 set_state() { printf '%s\n' "$1" > "$STATE_FILE"; }
 set_block() { printf '%s\n' "$1" > "$BLOCK_FILE"; }
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+read_kimi_keys() {
+  KIMI_KEYS=()
+  if [[ ! -f "$KIMI_KEYS_FILE" ]]; then
+    return 1
+  fi
+
+  local line key
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    key="$(trim "${line%%#*}")"
+    [[ -n "$key" ]] || continue
+    KIMI_KEYS+=("$key")
+  done < "$KIMI_KEYS_FILE"
+
+  (( ${#KIMI_KEYS[@]} > 0 ))
+}
+
+read_kimi_key_index() {
+  local idx
+  idx=0
+  if [[ -f "$KIMI_KEY_INDEX_FILE" ]]; then
+    idx="$(tr -cd '0-9' < "$KIMI_KEY_INDEX_FILE" | head -c 32)"
+    [[ -n "$idx" ]] || idx=0
+  fi
+  printf '%s' "$idx"
+}
+
+write_kimi_key_index() {
+  local idx="$1"
+  printf '%s\n' "$idx" > "$KIMI_KEY_INDEX_FILE"
+}
+
+run_research_with_kimi() {
+  local task="$1"
+  local rc idx key_count attempt slot key
+
+  if ! read_kimi_keys; then
+    log "error: kimi key file missing/empty: $KIMI_KEYS_FILE"
+    return 86
+  fi
+
+  key_count="${#KIMI_KEYS[@]}"
+  idx="$(read_kimi_key_index)"
+  if ! [[ "$idx" =~ ^[0-9]+$ ]]; then
+    idx=0
+  fi
+  idx=$(( idx % key_count ))
+
+  rc=1
+  for ((attempt=1; attempt<=key_count; attempt++)); do
+    slot=$(( (idx + attempt - 1) % key_count ))
+    key="${KIMI_KEYS[$slot]}"
+    log "info: kimi exec attempt=${attempt}/${key_count} key_index=${slot} model=${KIMI_MODEL}"
+
+    rc=0
+    if [[ "$KIMI_EXEC_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && (( KIMI_EXEC_TIMEOUT_SECONDS > 0 )); then
+      timeout "$KIMI_EXEC_TIMEOUT_SECONDS" env \
+        KIMI_API_KEY="$key" \
+        MOONSHOT_API_KEY="$key" \
+        OPENAI_API_KEY="$key" \
+        "$KIMI_BIN" \
+        --print \
+        --model "$KIMI_MODEL" \
+        --work-dir "$REPO" \
+        --prompt "$task" >> "$LOG_FILE" 2>&1 || rc=$?
+    else
+      env \
+        KIMI_API_KEY="$key" \
+        MOONSHOT_API_KEY="$key" \
+        OPENAI_API_KEY="$key" \
+        "$KIMI_BIN" \
+        --print \
+        --model "$KIMI_MODEL" \
+        --work-dir "$REPO" \
+        --prompt "$task" >> "$LOG_FILE" 2>&1 || rc=$?
+    fi
+
+    if [[ "$rc" -eq 0 ]]; then
+      write_kimi_key_index "$slot"
+      return 0
+    fi
+
+    log "warn: kimi exec failed rc=${rc} key_index=${slot}; rotating key"
+  done
+
+  write_kimi_key_index $(( (idx + 1) % key_count ))
+  return "$rc"
+}
 
 if [[ "$TMUX_WRAP_ENABLED" == "1" && "$WORKER_MODE" != "1" ]]; then
   if command -v tmux >/dev/null 2>&1; then
@@ -153,12 +251,12 @@ fi
 
 cd "$REPO"
 
-if [[ ! -x "$CODEX_BIN" ]]; then
-  if command -v codex >/dev/null 2>&1; then
-    CODEX_BIN="$(command -v codex)"
+if [[ ! -x "$KIMI_BIN" ]]; then
+  if command -v kimi >/dev/null 2>&1; then
+    KIMI_BIN="$(command -v kimi)"
   else
-    set_state "failed_no_codex"
-    log "error: codex binary not found"
+    set_state "failed_no_kimi"
+    log "error: kimi binary not found"
     exit 0
   fi
 fi
@@ -225,7 +323,7 @@ if [[ "$TARGET_TYPE" == "DIR" ]]; then
 
 要求：
 - 必须是实质研究，不要空文档或模板占位。
-- 使用 codex exec 非 REPL 模式执行本任务。
+- 使用 kimi cli 非 REPL（print）模式执行本任务，模型使用 ${KIMI_MODEL}。
 PROMPT
 else
   TARGET_DIR="$(dirname "$TARGET_PATH")"
@@ -306,7 +404,7 @@ else
 
 要求：
 - 必须是实质研究，不要空文档或模板占位。
-- 使用 codex exec 非 REPL 模式执行本任务。
+- 使用 kimi cli 非 REPL（print）模式执行本任务，模型使用 ${KIMI_MODEL}。
 PROMPT
   else
     BATCH_LABEL="$TARGET_DIR"
@@ -342,7 +440,7 @@ ${BATCH_ITEMS}
 要求：
 - 本批次必须是实质研究，不要空文档或模板占位。
 - 若单文件本身超过 ${MAX_BATCH_BYTES} bytes，允许作为单文件批次继续研究，不要跳过。
-- 使用 codex exec 非 REPL 模式执行本任务。
+- 使用 kimi cli 非 REPL（print）模式执行本任务，模型使用 ${KIMI_MODEL}。
 PROMPT
   fi
 fi
@@ -351,11 +449,7 @@ set_state "running_exec"
 set_block 0
 
 run_rc=0
-if [[ "$CODEX_EXEC_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && (( CODEX_EXEC_TIMEOUT_SECONDS > 0 )); then
-  timeout "$CODEX_EXEC_TIMEOUT_SECONDS" "$CODEX_BIN" --yolo exec "$TASK" >> "$LOG_FILE" 2>&1 || run_rc=$?
-else
-  "$CODEX_BIN" --yolo exec "$TASK" >> "$LOG_FILE" 2>&1 || run_rc=$?
-fi
+run_research_with_kimi "$TASK" || run_rc=$?
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
   git add -A
