@@ -1988,10 +1988,10 @@ Legend: `[ ]` pending, `[x]` researched.
 - [ ] [FILE] codex-rs/core/src/tools/handlers/unified_exec.rs
 - [ ] [FILE] codex-rs/core/src/tools/handlers/unified_exec_tests.rs
 - [ ] [FILE] codex-rs/core/src/tools/handlers/view_image.rs
-- [ ] [FILE] codex-rs/core/src/tools/js_repl/kernel.js
-- [ ] [FILE] codex-rs/core/src/tools/js_repl/meriyah.umd.min.js
-- [ ] [FILE] codex-rs/core/src/tools/js_repl/mod.rs
-- [ ] [FILE] codex-rs/core/src/tools/js_repl/mod_tests.rs
+- [x] [FILE] codex-rs/core/src/tools/js_repl/kernel.js
+- [x] [FILE] codex-rs/core/src/tools/js_repl/meriyah.umd.min.js
+- [x] [FILE] codex-rs/core/src/tools/js_repl/mod.rs
+- [x] [FILE] codex-rs/core/src/tools/js_repl/mod_tests.rs
 - [ ] [FILE] codex-rs/core/src/tools/mod.rs
 - [ ] [FILE] codex-rs/core/src/tools/network_approval.rs
 - [ ] [FILE] codex-rs/core/src/tools/network_approval_tests.rs
