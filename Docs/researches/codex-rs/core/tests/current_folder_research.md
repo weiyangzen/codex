@@ -1,589 +1,340 @@
-# 研究文档：codex-rs/core/tests 目录
+# DIR codex-rs/core/tests 研究文档
 
-## 目录结构概览
+## 场景与职责
+
+`codex-rs/core/tests` 是 Codex Rust 核心库的集成测试目录，负责验证 `codex-core` crate 的端到端行为。该目录包含 133+ 个文件，构成了一套全面的集成测试体系，模拟真实的 Codex 使用场景，包括：
+
+- **API 交互测试**：模拟 OpenAI Responses API 的 SSE 流和 WebSocket 通信
+- **工具执行测试**：验证 shell 命令、文件操作、代码补丁等工具的正确性
+- **沙箱安全测试**：测试 Seatbelt (macOS) 和 Landlock (Linux) 沙箱策略
+- **会话管理测试**：验证对话恢复、上下文压缩、多轮对话状态保持
+- **配置与特性测试**：测试各种配置选项和特性开关的行为
+
+该测试目录是确保 Codex 核心功能稳定性和安全性的关键基础设施。
+
+## 功能点目的
+
+### 1. 测试基础设施 (common/)
+
+提供共享的测试工具和模拟服务器：
+
+| 模块 | 目的 |
+|------|------|
+| `lib.rs` | 测试入口，提供配置加载、SSE fixture 加载、事件等待等通用工具 |
+| `test_codex.rs` | `TestCodex` 构建器，用于创建配置好的测试 Codex 实例 |
+| `test_codex_exec.rs` | `codex-exec` 二进制文件的测试支持 |
+| `responses.rs` | Mock SSE 服务器和 WebSocket 测试服务器，模拟 OpenAI API |
+| `streaming_sse.rs` | 流式 SSE 服务器，支持分块控制的响应模拟 |
+| `apps_test_server.rs` | MCP Apps/Connectors 的模拟服务器 |
+| `context_snapshot.rs` | 请求/响应快照格式化，用于 insta 快照测试 |
+| `process.rs` | 进程生命周期管理工具 |
+| `tracing.rs` | OpenTelemetry 测试追踪支持 |
+| `zsh_fork.rs` | Zsh fork 模式测试支持 |
+
+### 2. 测试套件 (suite/)
+
+按功能域组织的测试模块：
+
+**核心功能测试：**
+- `client.rs` - ModelClient 的流式响应、认证、会话恢复测试
+- `tools.rs` - 工具调用（shell、apply_patch、自定义工具）测试
+- `shell_command.rs` - Shell 命令执行的各种场景
+- `read_file.rs`, `list_dir.rs`, `grep_files.rs` - 文件系统工具测试
+- `apply_patch_cli.rs` - 代码补丁应用测试
+
+**沙箱与安全测试：**
+- `exec.rs` - macOS Seatbelt 沙箱执行测试
+- `seatbelt.rs` - Seatbelt 沙箱策略验证
+- `exec_policy.rs` - 执行策略检查
+- `request_permissions.rs` - 权限请求流程
+
+**会话与状态管理：**
+- `compact.rs` - 上下文压缩（summarization）测试
+- `compact_remote.rs` - 远程模型压缩测试
+- `compact_resume_fork.rs` - 压缩后的恢复和分支测试
+- `resume.rs` - 会话恢复测试
+- `undo.rs` - 撤销操作测试
+
+**网络与协议测试：**
+- `client_websockets.rs` - WebSocket 实时通信测试
+- `websocket_fallback.rs` - WebSocket 降级到 SSE 测试
+- `request_compression.rs` - 请求压缩测试
+- `responses_headers.rs` - HTTP 头验证测试
+
+**代理与多智能体：**
+- `agent_jobs.rs` - 代理任务测试
+- `agent_websocket.rs` - 代理 WebSocket 通信
+- `hierarchical_agents.rs` - 层级代理测试
+- `spawn_agent_description.rs` - 子代理描述测试
+
+**配置与特性：**
+- `model_switching.rs` - 模型切换测试
+- `model_overrides.rs` - 模型配置覆盖
+- `skills.rs` - Skills 系统测试
+- `plugins.rs` - 插件系统测试
+- `prompt_caching.rs` - 提示缓存测试
+
+### 3. 测试 Fixtures
+
+- `cli_responses_fixture.sse` - SSE 响应格式示例
+- `fixtures/incomplete_sse.json` - 不完整 SSE 事件测试数据
+- `suite/snapshots/` - insta 快照测试的预期输出
+
+## 具体技术实现
+
+### 关键流程
+
+#### 1. 测试生命周期流程
 
 ```
-codex-rs/core/tests/
-├── all.rs                          # 测试入口点，聚合所有测试模块
-├── cli_responses_fixture.sse       # CLI SSE 响应 fixture
-├── responses_headers.rs            # 响应头测试
-├── common/                         # 测试共享库（core_test_support crate）
-│   ├── lib.rs                      # 公共测试工具库主入口
-│   ├── Cargo.toml                  # 测试库 crate 配置
-│   ├── BUILD.bazel                 # Bazel 构建配置
-│   ├── apps_test_server.rs         # Apps/MCP 测试服务器模拟
-│   ├── context_snapshot.rs         # 请求上下文快照格式化工具
-│   ├── process.rs                  # 进程管理工具（PID 等待等）
-│   ├── responses.rs                # Mock HTTP/WebSocket 服务器和 SSE 构造器
-│   ├── streaming_sse.rs            # 流式 SSE 测试服务器
-│   ├── test_codex.rs               # TestCodex 构建器和测试 harness
-│   ├── test_codex_exec.rs          # codex-exec 二进制测试工具
-│   ├── tracing.rs                  # OpenTelemetry 测试追踪工具
-│   └── zsh_fork.rs                 # Zsh fork 运行时测试支持
-├── fixtures/                       # 测试数据文件
-│   └── incomplete_sse.json         # 不完整 SSE 响应 fixture
-└── suite/                          # 测试套件（80+ 个测试模块）
-    ├── mod.rs                      # 测试套件模块聚合
-    ├── snapshots/                  # insta 快照测试文件
-    └── ...                         # 各功能测试模块
+all.rs (测试入口)
+    └── suite/mod.rs (测试模块聚合)
+        ├── #[ctor] CODEX_ALIASES_TEMP_DIR (初始化测试环境)
+        │   └── 设置临时 CODEX_HOME
+        │   └── arg0_dispatch() 创建命令别名
+        └── 各测试模块...
 ```
 
----
-
-## 1. 场景与职责
-
-### 1.1 核心职责
-
-`codex-rs/core/tests` 是 **Codex Core** crate 的集成测试套件，负责：
-
-1. **端到端功能验证**：测试 Codex 从用户输入到模型响应的完整流程
-2. **协议兼容性测试**：验证与 OpenAI Responses API、WebSocket、MCP 协议的交互
-3. **沙箱安全测试**：验证 Seatbelt、Landlock、Seccomp 等沙箱机制
-4. **会话状态管理**：测试 rollout 持久化、resume、compact 等状态操作
-5. **工具调用测试**：验证 shell、apply_patch、file_search 等工具行为
-6. **多模态支持**：测试图像、实时对话、Web 搜索等功能
-
-### 1.2 测试架构设计
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Test Suite Architecture                   │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────┐  │
-│  │  all.rs     │───▶│  suite/mod  │───▶│  Individual Tests   │  │
-│  │  (entry)    │    │  (modules)  │    │  (80+ modules)      │  │
-│  └─────────────┘    └─────────────┘    └─────────────────────┘  │
-│         │                                                    │  │
-│         ▼                                                    │  │
-│  ┌──────────────────────────────────────────────────────────┐│  │
-│  │              core_test_support (common/)                 ││  │
-│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────────────┐ ││  │
-│  │  │ TestCodex   │ │ MockServer  │ │  Event Assertions   │ ││  │
-│  │  │ Builder     │ │ (wiremock)  │ │  (wait_for_event)   │ ││  │
-│  │  └─────────────┘ └─────────────┘ └─────────────────────┘ ││  │
-│  └──────────────────────────────────────────────────────────┘│  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 2. 功能点目的
-
-### 2.1 common/ 测试支持库
-
-| 模块 | 功能目的 | 关键能力 |
-|------|----------|----------|
-| `lib.rs` | 测试基础设施入口 | 配置加载、路径处理、宏定义（skip_if_sandbox, skip_if_no_network） |
-| `test_codex.rs` | TestCodex 构建器 | 创建隔离的 Codex 实例，支持 mock 服务器、配置覆盖、resume |
-| `responses.rs` | Mock 服务器和 SSE 构造 | wiremock 集成、SSE 事件构造器、请求捕获和验证 |
-| `streaming_sse.rs` | 流式 SSE 服务器 | 支持 gated chunk 的流式响应测试，用于测试超时、中断场景 |
-| `context_snapshot.rs` | 请求快照格式化 | 将 API 请求转换为可读的快照格式，用于 insta 快照测试 |
-| `apps_test_server.rs` | Apps/MCP 模拟 | 模拟 Calendar/Gmail 等 connector 的 MCP 协议响应 |
-| `zsh_fork.rs` | Zsh fork 测试支持 | 支持 ShellZshFork 特性的测试环境搭建 |
-| `process.rs` | 进程管理 | PID 文件等待、进程存活检测 |
-| `tracing.rs` | OpenTelemetry 测试 | 测试追踪上下文设置 |
-| `test_codex_exec.rs` | codex-exec 测试 | codex-exec 二进制命令构建 |
-
-### 2.2 suite/ 测试模块分类
-
-#### A. 核心客户端测试 (Client)
-- `client.rs` - 基础客户端功能：认证、header、指令、会话恢复
-- `client_websockets.rs` - WebSocket 实时对话测试
-- `resume.rs` - 会话恢复功能
-- `resume_warning.rs` - 恢复警告场景
-
-#### B. 模型与配置测试 (Model)
-- `model_overrides.rs` - 模型覆盖配置
-- `model_info_overrides.rs` - 模型信息覆盖
-- `model_switching.rs` - 运行时模型切换
-- `model_visible_layout.rs` - 模型可见布局（快照测试）
-- `remote_models.rs` - 远程模型列表
-- `models_cache_ttl.rs` - 模型缓存 TTL
-- `models_etag_responses.rs` - ETag 响应处理
-
-#### C. 上下文压缩测试 (Compact)
-- `compact.rs` - 手动/自动上下文压缩
-- `compact_remote.rs` - 远程压缩端点测试
-- `compact_resume_fork.rs` - 压缩后恢复和 fork
-
-#### D. 工具调用测试 (Tools)
-- `tools.rs` - 基础工具调用、超时、沙箱拒绝
-- `shell_command.rs` - Shell 命令执行
-- `shell_serialization.rs` - Shell 序列化
-- `shell_snapshot.rs` - Shell 快照测试
-- `user_shell_cmd.rs` - 用户 shell 命令
-- `apply_patch_cli.rs` - apply_patch CLI 测试
-- `read_file.rs` - 文件读取工具
-- `list_dir.rs` - 目录列表工具
-- `grep_files.rs` - 文件搜索工具
-- `search_tool.rs` - 搜索工具
-- `view_image.rs` - 图像查看工具
-- `web_search.rs` - Web 搜索工具
-- `js_repl.rs` - JavaScript REPL 工具
-- `image_rollout.rs` - 图像 rollout 处理
-
-#### E. 执行与沙箱测试 (Execution)
-- `exec.rs` - macOS Seatbelt 沙箱执行（仅 macOS）
-- `exec_policy.rs` - 执行策略测试
-- `seatbelt.rs` - Seatbelt 沙箱特定测试
-- `unified_exec.rs` - UnifiedExec 工具测试
-- `sandbox_denied.rs` - 沙箱拒绝场景
-
-#### F. Agent 与子代理测试 (Agent)
-- `agent_jobs.rs` - Agent 作业管理
-- `agent_websocket.rs` - Agent WebSocket 通信
-- `hierarchical_agents.rs` - 层级 Agent 结构
-- `spawn_agent_description.rs` - 子代理描述
-- `subagent_notifications.rs` - 子代理通知
-- `codex_delegate.rs` - Codex 委托
-
-#### G. 权限与审批测试 (Permissions)
-- `approvals.rs` - 审批流程
-- `request_permissions.rs` - 权限请求
-- `request_permissions_tool.rs` - 工具权限请求
-- `skill_approval.rs` - Skill 审批
-- `permissions_messages.rs` - 权限消息
-
-#### H. 会话与状态测试 (Session)
-- `sqlite_state.rs` - SQLite 状态存储
-- `turn_state.rs` - Turn 状态管理
-- `pending_input.rs` - 待处理输入
-- `items.rs` - 响应项处理
-- `undo.rs` - 撤销操作
-- `fork_thread.rs` - 线程 fork
-
-#### I. 协议与通信测试 (Protocol)
-- `cli_stream.rs` - CLI 流式响应
-- `websocket_fallback.rs` - WebSocket 降级
-- `stream_error_allows_next_turn.rs` - 流错误恢复
-- `stream_no_completed.rs` - 无 completed 事件处理
-- `request_compression.rs` - 请求压缩 (zstd)
-- `responses_headers.rs` - 响应头验证
-
-#### J. 特性与扩展测试 (Features)
-- `skills.rs` - Skills 系统
-- `plugins.rs` - Plugins 系统
-- `hooks.rs` - Hooks 系统
-- `collaboration_instructions.rs` - 协作指令
-- `personality.rs` - Personality 配置
-- `personality_migration.rs` - Personality 迁移
-- `memories.rs` - Memories 功能
-- `code_mode.rs` - Code 模式
-
-#### K. 其他测试
-- `auth_refresh.rs` - 认证刷新
-- `deprecation_notice.rs` - 弃用通知
-- `live_cli.rs` - 实时 CLI
-- `live_reload.rs` - 实时重载
-- `otel.rs` - OpenTelemetry 集成
-- `override_updates.rs` - 配置覆盖更新
-- `prompt_caching.rs` - 提示缓存
-- `quota_exceeded.rs` - 配额超限
-- `realtime_conversation.rs` - 实时对话
-- `review.rs` - 审查功能
-- `rmcp_client.rs` - RMCP 客户端
-- `rollout_list_find.rs` - Rollout 列表查找
-- `safety_check_downgrade.rs` - 安全检查降级
-- `text_encoding_fix.rs` - 文本编码修复
-- `tool_harness.rs` - 工具 harness
-- `tool_parallelism.rs` - 工具并行执行
-- `truncation.rs` - 截断处理
-- `unstable_features_warning.rs` - 不稳定特性警告
-- `user_notification.rs` - 用户通知
-- `json_result.rs` - JSON 结果输出
-- `abort_tasks.rs` - 任务中止
-
----
-
-## 3. 具体技术实现
-
-### 3.1 TestCodex 构建器模式
+#### 2. Mock Server 响应流程
 
 ```rust
-// tests/common/test_codex.rs
-pub struct TestCodexBuilder {
-    config_mutators: Vec<Box<ConfigMutator>>,
-    auth: CodexAuth,
-    pre_build_hooks: Vec<Box<PreBuildHook>>,
-    home: Option<Arc<TempDir>>,
-    user_shell_override: Option<Shell>,
-}
+// 1. 启动 Mock 服务器
+let server = responses::start_mock_server().await;
 
-impl TestCodexBuilder {
-    pub fn with_config<T>(mut self, mutator: T) -> Self
-    pub fn with_model(self, model: &str) -> Self
-    pub fn with_auth(mut self, auth: CodexAuth) -> Self
-    pub async fn build(&mut self, server: &MockServer) -> anyhow::Result<TestCodex>
-    pub async fn resume(&mut self, server: &MockServer, home: Arc<TempDir>, rollout_path: PathBuf) -> anyhow::Result<TestCodex>
-}
+// 2. 挂载 SSE 响应
+let mock = responses::mount_sse_once(
+    &server,
+    responses::sse(vec![
+        responses::ev_response_created("resp-1"),
+        responses::ev_function_call(call_id, "shell", &arguments),
+        responses::ev_completed("resp-1"),
+    ]),
+).await;
+
+// 3. 构建测试 Codex
+let test = test_codex().build(&server).await?;
+
+// 4. 提交用户输入
+test.submit_turn("run command").await?;
+
+// 5. 验证请求
+let request = mock.single_request();
+assert!(request.has_function_call(call_id));
 ```
 
-**关键设计**：
-- 使用 `TempDir` 隔离每个测试的 `CODEX_HOME`，避免污染开发者真实配置
-- 支持配置覆盖链式调用
-- 自动配置 mock 服务器为模型 provider
+#### 3. 事件等待流程
 
-### 3.2 Mock 服务器与 SSE 构造
-
-```rust
-// tests/common/responses.rs
-
-// SSE 事件构造器
-pub fn sse(events: Vec<Value>) -> String
-pub fn ev_completed(id: &str) -> Value
-pub fn ev_function_call(call_id: &str, name: &str, arguments: &str) -> Value
-pub fn ev_assistant_message(id: &str, text: &str) -> Value
-
-// Mock 服务器挂载
-pub async fn mount_sse_once(server: &MockServer, body: String) -> ResponseMock
-pub async fn mount_sse_sequence(server: &MockServer, responses: Vec<String>) -> ResponseMock
-pub async fn start_mock_server() -> MockServer
-
-// 请求捕获和验证
-pub struct ResponseMock {
-    requests: Arc<Mutex<Vec<ResponsesRequest>>>,
-}
-impl ResponseMock {
-    pub fn single_request(&self) -> ResponsesRequest
-    pub fn requests(&self) -> Vec<ResponsesRequest>
-    pub fn saw_function_call(&self, call_id: &str) -> bool
-}
-```
-
-### 3.3 事件等待与断言
-
-```rust
-// tests/common/lib.rs
-pub async fn wait_for_event<F>(
-    codex: &CodexThread,
-    predicate: F,
-) -> codex_protocol::protocol::EventMsg
-where
-    F: FnMut(&codex_protocol::protocol::EventMsg) -> bool,
-
-pub async fn wait_for_event_with_timeout<F>(
-    codex: &CodexThread,
-    mut predicate: F,
-    wait_time: tokio::time::Duration,
-) -> codex_protocol::protocol::EventMsg
-```
-
-**使用模式**：
 ```rust
 // 等待特定事件
-let turn_id = wait_for_event_match(&codex, |event| match event {
+let ev = wait_for_event(&codex, |ev| {
+    matches!(ev, EventMsg::TurnComplete { .. })
+}).await;
+
+// 等待事件并提取数据
+let turn_id = wait_for_event_match(&codex, |ev| match ev {
     EventMsg::TurnStarted(event) => Some(event.turn_id.clone()),
     _ => None,
 }).await;
-
-// 等待 turn 完成
-wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 ```
 
-### 3.4 流式 SSE 服务器
+### 关键数据结构
+
+#### TestCodex 结构
 
 ```rust
-// tests/common/streaming_sse.rs
-pub struct StreamingSseChunk {
-    pub gate: Option<oneshot::Receiver<()>>,  // 控制 chunk 发送时机
-    pub body: String,
-}
-
-pub async fn start_streaming_sse_server(
-    responses: Vec<Vec<StreamingSseChunk>>,
-) -> (StreamingSseServer, Vec<oneshot::Receiver<i64>>)
-```
-
-**用途**：测试流式响应中断、超时、背压等场景。
-
-### 3.5 上下文快照测试
-
-```rust
-// tests/common/context_snapshot.rs
-pub fn format_request_input_snapshot(
-    request: &ResponsesRequest,
-    options: &ContextSnapshotOptions,
-) -> String
-
-pub fn format_response_items_snapshot(
-    items: &[Value],
-    options: &ContextSnapshotOptions,
-) -> String
-```
-
-**功能**：
-- 将 API 请求转换为可读文本格式
-- 支持敏感信息脱敏（RedactedText 模式）
-- 支持能力指令剥离（strip_capability_instructions）
-- 与 `insta` 快照测试框架集成
-
-### 3.6 条件编译与平台特定测试
-
-```rust
-// tests/suite/mod.rs
-#[cfg(not(target_os = "windows"))]
-mod abort_tasks;
-mod agent_jobs;
-...
-#[cfg(not(target_os = "windows"))]
-mod hooks;
-...
-#[cfg(not(target_os = "windows"))]
-mod request_permissions;
-#[cfg(not(target_os = "windows"))]
-mod request_permissions_tool;
-```
-
-**平台跳过宏**：
-```rust
-// tests/common/lib.rs
-#[macro_export]
-macro_rules! skip_if_sandbox {
-    () => {{ if env::var($crate::sandbox_env_var()) == Ok("seatbelt".to_string()) { return; } }};
-}
-
-#[macro_export]
-macro_rules! skip_if_no_network {
-    () => {{ if env::var($crate::sandbox_network_env_var()).is_ok() { return; } }};
+pub struct TestCodex {
+    pub home: Arc<TempDir>,           // 临时 CODEX_HOME
+    pub cwd: Arc<TempDir>,            // 临时工作目录
+    pub codex: Arc<CodexThread>,      // 被测 Codex 实例
+    pub session_configured: SessionConfiguredEvent,
+    pub config: Config,
+    pub thread_manager: Arc<ThreadManager>,
 }
 ```
 
----
+#### SSE 事件构建器
 
-## 4. 关键代码路径与文件引用
+```rust
+// 事件类型
+pub fn ev_response_created(id: &str) -> Value;
+pub fn ev_completed(id: &str) -> Value;
+pub fn ev_function_call(call_id: &str, name: &str, arguments: &str) -> Value;
+pub fn ev_custom_tool_call(call_id: &str, name: &str, input: &str) -> Value;
+pub fn ev_assistant_message(id: &str, text: &str) -> Value;
+pub fn ev_reasoning_item(id: &str, summary: &[&str], raw_content: &[&str]) -> Value;
 
-### 4.1 测试执行流程
-
-```
-1. all.rs
-   └── mod suite;  // 引入 suite/mod.rs
-
-2. suite/mod.rs
-   └── #[ctor] static CODEX_ALIASES_TEMP_DIR  // 测试前初始化
-   └── mod client;  // 等 80+ 模块
-
-3. 单个测试（如 suite/client.rs）
-   └── #[tokio::test]
-       └── test_codex().build(&server).await  // 使用 common/test_codex.rs
-       └── mount_sse_once(&server, ...)       // 使用 common/responses.rs
-       └── wait_for_event(&codex, ...)        // 使用 common/lib.rs
+// SSE 流构建
+pub fn sse(events: Vec<Value>) -> String;
 ```
 
-### 4.2 核心依赖链
+#### ResponsesRequest 请求检查器
 
-```
-codex-core (被测 crate)
-    ▲
-    │ 使用 ThreadManager, CodexThread, Config 等
-    │
-core_test_support (测试库)
-    │
-    ├── wiremock (HTTP mock 服务器)
-    ├── tokio-tungstenite (WebSocket 测试)
-    ├── insta (快照测试)
-    ├── tempfile (临时目录)
-    └── pretty_assertions (更好的断言输出)
+```rust
+impl ResponsesRequest {
+    pub fn body_json(&self) -> Value;
+    pub fn input(&self) -> Vec<Value>;
+    pub fn function_call_output(&self, call_id: &str) -> Value;
+    pub fn has_function_call(&self, call_id: &str) -> bool;
+    pub fn header(&self, name: &str) -> Option<String>;
+    pub fn message_input_texts(&self, role: &str) -> Vec<String>;
+}
 ```
 
-### 4.3 关键文件索引
+### 协议与命令
 
-| 功能 | 文件路径 |
-|------|----------|
-| 测试入口 | `codex-rs/core/tests/all.rs` |
-| 测试模块聚合 | `codex-rs/core/tests/suite/mod.rs` |
-| 测试库主入口 | `codex-rs/core/tests/common/lib.rs` |
-| TestCodex 构建器 | `codex-rs/core/tests/common/test_codex.rs` |
-| Mock 服务器 | `codex-rs/core/tests/common/responses.rs` |
-| 流式 SSE 服务器 | `codex-rs/core/tests/common/streaming_sse.rs` |
-| 快照格式化 | `codex-rs/core/tests/common/context_snapshot.rs` |
-| Apps 测试服务器 | `codex-rs/core/tests/common/apps_test_server.rs` |
-| Zsh fork 支持 | `codex-rs/core/tests/common/zsh_fork.rs` |
-| 进程工具 | `codex-rs/core/tests/common/process.rs` |
-| 追踪工具 | `codex-rs/core/tests/common/tracing.rs` |
-| codex-exec 测试 | `codex-rs/core/tests/common/test_codex_exec.rs` |
-| 测试库配置 | `codex-rs/core/tests/common/Cargo.toml` |
+#### 支持的 Mock API 端点
 
----
+| 端点 | 方法 | 用途 |
+|------|------|------|
+| `/v1/models` | GET | 模型列表查询 |
+| `/v1/responses` | POST | 主要对话端点 (SSE) |
+| `/v1/responses/compact` | POST | 上下文压缩端点 |
 
-## 5. 依赖与外部交互
+#### 测试宏
 
-### 5.1 内部依赖
+```rust
+// 跳过沙盒中的测试
+skip_if_sandbox!();
+
+// 跳过无网络测试
+skip_if_no_network!();
+
+// Linux 沙盒二进制文件检查
+codex_linux_sandbox_exe_or_skip!();
+```
+
+## 关键代码路径与文件引用
+
+### 核心测试基础设施
+
+| 文件 | 职责 | 关键类型/函数 |
+|------|------|---------------|
+| `tests/all.rs` | 测试入口 | `mod suite;` |
+| `tests/suite/mod.rs` | 测试模块聚合 | `CODEX_ALIASES_TEMP_DIR` |
+| `tests/common/lib.rs` | 通用测试工具 | `load_default_config_for_test`, `wait_for_event` |
+| `tests/common/test_codex.rs` | Codex 测试构建器 | `TestCodexBuilder`, `TestCodexHarness` |
+| `tests/common/responses.rs` | Mock 响应服务器 | `start_mock_server`, `mount_sse_once` |
+
+### 主要测试模块
+
+| 文件 | 测试范围 | 关键测试 |
+|------|----------|----------|
+| `tests/suite/client.rs` | ModelClient 核心功能 | `resume_includes_initial_messages`, `stream_yields_events` |
+| `tests/suite/tools.rs` | 工具调用 | `shell_escalated_permissions_rejected`, `sandbox_denied_shell_returns_original_output` |
+| `tests/suite/shell_command.rs` | Shell 执行 | `shell_command_works`, `output_with_login` |
+| `tests/suite/compact.rs` | 上下文压缩 | `manual_compact_with_history`, `pre_turn_compaction` |
+| `tests/suite/exec.rs` | 沙箱执行 | `exit_code_0_succeeds`, `write_file_fails_as_sandbox_error` |
+| `tests/suite/resume.rs` | 会话恢复 | `resume_from_rollout`, `resume_preserves_model` |
+
+### 快照测试文件
+
+位于 `tests/suite/snapshots/`，使用 insta 框架：
+- `all__suite__compact__*.snap` - 压缩测试快照
+- `all__suite__compact_remote__*.snap` - 远程压缩测试快照
+- `all__suite__model_visible_layout__*.snap` - 模型可见布局快照
+
+## 依赖与外部交互
+
+### 内部依赖
+
+```
+codex-core (被测库)
+├── codex-protocol (协议类型)
+├── codex-otel (遥测)
+├── codex-utils-* (工具库)
+└── core_test_support (测试支持库)
+    ├── codex-core
+    ├── codex-protocol
+    ├── wiremock (HTTP mock)
+    ├── tokio (异步运行时)
+    └── insta (快照测试)
+```
+
+### 外部依赖
 
 | Crate | 用途 |
 |-------|------|
-| `codex-core` | 被测 crate，提供 ThreadManager、CodexThread、Config 等 |
-| `codex-protocol` | 协议类型定义（EventMsg、Op、ResponseItem 等） |
-| `codex-utils-cargo-bin` | 定位测试二进制文件 |
-| `codex-utils-absolute-path` | 绝对路径处理 |
-| `codex-arg0` | arg0 分发测试支持 |
-
-### 5.2 外部依赖
-
-| Crate | 用途 |
-|-------|------|
-| `wiremock` | HTTP mock 服务器，模拟 OpenAI API |
-| `tokio-tungstenite` | WebSocket 服务器和客户端 |
-| `insta` | 快照测试框架 |
-| `tempfile` | 临时目录和文件 |
-| `pretty_assertions` | 美观的断言输出 |
-| `assert_cmd` | CLI 二进制测试 |
-| `predicates` | 断言谓词 |
-| `serde_json` | JSON 序列化/反序列化 |
+| `wiremock` | HTTP Mock 服务器 |
 | `tokio` | 异步运行时 |
-| `futures` | 异步工具 |
-| `notify` | 文件系统监视（fs_wait 模块） |
-| `walkdir` | 目录遍历 |
-| `zstd` | 请求体压缩解码 |
-| `opentelemetry` / `tracing-opentelemetry` | 分布式追踪测试 |
+| `insta` | 快照测试 |
+| `tempfile` | 临时目录管理 |
+| `serde_json` | JSON 处理 |
+| `assert_cmd` | CLI 测试 |
+| `pretty_assertions` | 美观的断言输出 |
 
-### 5.3 测试数据与 Fixtures
+### 系统依赖
 
-| 文件 | 用途 |
-|------|------|
-| `cli_responses_fixture.sse` | CLI SSE 响应示例 |
-| `fixtures/incomplete_sse.json` | 不完整 SSE 事件测试数据 |
-| `suite/snapshots/*.snap` | insta 快照文件（30+ 个） |
+- **zsh**: Zsh fork 模式测试需要特定版本的 zsh
+- **dotslash**: 用于获取测试用的 zsh 二进制文件
+- **codex-linux-sandbox**: Linux 沙箱测试需要此二进制文件
+- **codex-execve-wrapper**: Zsh fork 测试需要
 
----
+### 网络依赖
 
-## 6. 风险、边界与改进建议
+部分测试需要网络访问（使用 `skip_if_no_network!()` 宏跳过）：
+- 实际的 API 调用测试
+- 模型列表获取测试
+- OAuth 流程测试
 
-### 6.1 当前风险
+## 风险、边界与改进建议
 
-#### A. 平台差异风险
-- **Windows 支持不完整**：大量测试使用 `#[cfg(not(target_os = "windows"))]` 跳过
-  - 影响模块：hooks、request_permissions、request_permissions_tool、abort_tasks、approvals
-  - 风险：Windows 平台行为未充分验证
+### 当前风险
 
-#### B. 网络依赖风险
-- **skip_if_no_network 宏**：部分测试需要网络访问，在沙箱环境中被跳过
-  - 可能导致沙箱 CI 中测试覆盖率下降
-  - 建议：增加纯本地 mock 测试作为补充
+1. **平台特定代码分散**
+   - 大量 `#[cfg(not(target_os = "windows"))]` 和 `#[cfg(target_os = "macos")]` 条件编译
+   - 某些测试仅在特定平台运行，可能导致跨平台回归
 
-#### C. 沙箱环境限制
-- **skip_if_sandbox 宏**：Seatbelt 沙箱中部分测试被跳过
-  - 原因：沙箱内无法嵌套沙箱，或需要特定系统权限
-  - 风险：沙箱相关代码路径在沙箱 CI 中未测试
+2. **测试执行时间**
+   - 集成测试涉及完整的 Codex 启动流程，执行时间较长
+   - 部分测试使用 `tokio::time::timeout`，在慢速 CI 环境可能不稳定
 
-#### D. 测试执行时间
-- **流式测试超时**：`wait_for_event_with_timeout` 默认 10 秒超时
-  - 在慢速 CI 环境中可能 flaky
-  - 建议：根据 CI 环境动态调整超时
+3. **外部二进制依赖**
+   - 依赖 `codex-linux-sandbox`、`codex-execve-wrapper` 等二进制文件
+   - 如果这些二进制文件未构建，相关测试会被跳过，可能掩盖问题
 
-### 6.2 边界情况
+4. **快照测试维护成本**
+   - 大量 `.snap` 文件需要随代码变更更新
+   - 格式变更可能导致大量快照需要重新生成
 
-#### A. 并发测试边界
-```rust
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-```
-- 多线程运行时可能暴露竞态条件
-- 建议：关键路径增加单线程测试验证
+### 边界情况
 
-#### B. 资源清理边界
-- `TempDir` 在测试结束时自动清理
-- 风险：测试 panic 时可能泄漏临时文件
-- 缓解：`#[ctor]` 初始化的 `CODEX_ALIASES_TEMP_DIR` 使用 `Arg0PathEntryGuard` 确保清理
+1. **沙盒环境检测**
+   - 测试通过 `CODEX_SANDBOX` 环境变量检测是否在沙盒中运行
+   - 在 Seatbelt 沙盒中某些测试会被跳过（如 `exec.rs`）
 
-#### C. 快照测试边界
-- 快照文件与代码变更同步
-- 风险：模型输出格式变更导致大量快照失效
-- 缓解：使用 `context_snapshot.rs` 的脱敏模式减少敏感数据
+2. **网络禁用环境**
+   - `CODEX_SANDBOX_NETWORK_DISABLED` 环境变量控制网络测试跳过
 
-### 6.3 改进建议
+3. **临时目录生命周期**
+   - 使用 `TempDir` 确保测试隔离，但需要小心处理跨异步任务的目录引用
 
-#### A. 测试覆盖率
-1. **增加 Windows 测试覆盖**
-   - 优先实现 hooks、permissions 的 Windows 兼容测试
-   - 使用 Windows 容器或 VM 运行 CI
+### 改进建议
 
-2. **增加错误路径测试**
-   - 当前测试主要关注正常路径
-   - 建议增加：网络超时、API 错误响应、磁盘满等异常场景
+1. **测试分类标记**
+   - 使用更细粒度的测试分类属性
+   - 例如：`#[test_category("network_required")]`, `#[test_category("slow")]`
 
-3. **增加并发压力测试**
-   - 多 turn 并发提交
-   - 大量工具调用并行执行
+2. **Mock 服务器复用**
+   - 当前每个测试启动独立的 MockServer
+   - 考虑使用共享的 MockServer 减少启动开销
 
-#### B. 测试基础设施
-1. **统一测试超时配置**
-   ```rust
-   // 建议：从环境变量读取超时
-   const TEST_TIMEOUT: Duration = Duration::from_secs(
-       env::var("CODEX_TEST_TIMEOUT_SECS")
-           .ok()
-           .and_then(|s| s.parse().ok())
-           .unwrap_or(10)
-   );
-   ```
+3. **测试数据工厂**
+   - 建立统一的测试数据生成工厂，减少重复代码
+   - 例如：统一的 SSE 响应序列生成器
 
-2. **增强日志输出**
-   - 测试失败时自动输出 Codex 事件日志
-   - 集成 `tracing` 的测试订阅器
+4. **增强文档**
+   - 为复杂的测试场景添加更多内联文档
+   - 特别是 `compact.rs` 和 `client.rs` 中的复杂状态机测试
 
-3. **并行测试优化**
-   - 使用 `cargo-nextest` 提高并行度
-   - 隔离共享资源（如端口分配）
+5. **并行测试优化**
+   - 当前使用 `serial_test` 的部分测试可以评估是否真正需要串行
+   - 提高并行度以缩短测试时间
 
-#### C. 维护性改进
-1. **测试文档化**
-   - 为复杂测试增加注释说明测试意图
-   - 使用 `rustdoc` 生成测试 API 文档
-
-2. **快照测试管理**
-   - 定期审查快照文件大小
-   - 压缩或分割过大的快照文件
-
-3. **依赖更新策略**
-   - `wiremock`、`insta` 等关键依赖及时跟进
-   - 评估 `tokio-tungstenite` 的替代方案（如 `fastwebsockets`）
-
-#### D. 安全测试增强
-1. **沙箱逃逸测试**
-   - 增加恶意 payload 测试
-   - 验证沙箱边界（文件系统、网络、进程）
-
-2. **认证安全测试**
-   - JWT token 过期处理
-   - API key 泄露检测
+6. **覆盖率监控**
+   - 建议添加代码覆盖率监控，确保关键路径有测试覆盖
+   - 特别关注错误处理分支的覆盖
 
 ---
 
-## 7. 附录：测试运行指南
-
-### 7.1 运行全部测试
-```bash
-cd codex-rs
-cargo test -p codex-core
-```
-
-### 7.2 运行特定模块测试
-```bash
-cargo test -p codex-core compact       # 仅运行 compact 相关测试
-cargo test -p codex-core client        # 仅运行 client 测试
-```
-
-### 7.3 快照测试管理
-```bash
-# 查看待审查快照
-cargo insta pending-snapshots -p codex-core
-
-# 接受所有新快照
-cargo insta accept -p codex-core
-
-# 查看特定快照差异
-cargo insta show -p codex-core path/to/file.snap.new
-```
-
-### 7.4 使用 nextest（推荐）
-```bash
-# 安装 cargo-nextest
-cargo install cargo-nextest
-
-# 运行测试（并行度更高）
-cargo nextest run -p codex-core
-```
-
----
-
-*文档生成时间：2026-03-21*
-*研究范围：codex-rs/core/tests 目录及其子目录*
+*文档生成时间: 2026-03-21*
+*研究范围: codex-rs/core/tests 目录及其子目录*
