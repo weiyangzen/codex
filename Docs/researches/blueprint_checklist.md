@@ -255,7 +255,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/environment
 - [x] [DIR] codex-rs/environment/src
 - [x] [DIR] codex-rs/exec
-- [ ] [DIR] codex-rs/exec-server
+- [x] [DIR] codex-rs/exec-server
 - [ ] [DIR] codex-rs/exec-server/src
 - [ ] [DIR] codex-rs/exec-server/src/bin
 - [ ] [DIR] codex-rs/exec-server/src/client
