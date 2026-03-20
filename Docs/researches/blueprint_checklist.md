@@ -253,7 +253,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/debug-client/src
 - [x] [DIR] codex-rs/docs
 - [x] [DIR] codex-rs/environment
-- [ ] [DIR] codex-rs/environment/src
+- [x] [DIR] codex-rs/environment/src
 - [ ] [DIR] codex-rs/exec
 - [ ] [DIR] codex-rs/exec-server
 - [ ] [DIR] codex-rs/exec-server/src
