@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-20 09:31:02 +0800
+Generated at: 2026-03-20 09:36:01 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -117,7 +117,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails/expected
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails/expected/dir
-- [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails/input
+- [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails/input
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails/input/dir
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/013_rejects_invalid_hunk_header
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/013_rejects_invalid_hunk_header/expected
