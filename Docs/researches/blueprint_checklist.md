@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-20 16:31:01 +0800
+Generated at: 2026-03-20 16:41:02 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -163,7 +163,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/backend-client/src
 - [x] [DIR] codex-rs/backend-client/tests
 - [x] [DIR] codex-rs/backend-client/tests/fixtures
-- [ ] [DIR] codex-rs/chatgpt
+- [x] [DIR] codex-rs/chatgpt
 - [ ] [DIR] codex-rs/chatgpt/src
 - [ ] [DIR] codex-rs/chatgpt/tests
 - [ ] [DIR] codex-rs/chatgpt/tests/suite
