@@ -2,251 +2,270 @@
 
 ## 场景与职责
 
-`code_mode` 是 Codex 核心工具系统中的一个实验性功能模块，提供在隔离的 JavaScript 环境中执行用户代码的能力。它允许模型通过 `exec` 工具运行原始 JavaScript 代码，并通过 `wait` 工具与长时间运行的代码单元（cell）进行交互。
+`code_mode` 是 Codex CLI 中一个实验性的 JavaScript 执行环境，允许模型在隔离的 JavaScript 上下文中执行代码，并调用其他工具。它是 `js_repl` 的轻量级替代方案，使用 Node.js 的内置 `vm` 模块而非持久化的 Node 内核。
 
 ### 核心职责
 
-1. **JavaScript 代码执行**：在隔离的 Node.js VM 环境中执行用户提供的 JavaScript 代码
-2. **嵌套工具调用**：允许 JavaScript 代码调用其他 Codex 工具（如 shell、文件操作等）
-3. **状态持久化**：支持在多次 `exec` 调用之间存储和加载数据
-4. **长时间运行支持**：通过 `wait` 工具支持长时间运行的脚本，支持中断和恢复
-5. **输出控制**：支持文本、图像输出，以及实时通知（notify）机制
+1. **提供隔离的 JavaScript 执行环境**：在 Node.js 的 VM 上下文中运行用户代码，无文件系统、网络或控制台访问
+2. **支持嵌套工具调用**：允许 JavaScript 代码通过 `tools` 全局对象调用其他 Codex 工具
+3. **状态持久化**：通过 `store`/`load` API 在同一会话的多次执行间共享数据
+4. **协作式多任务**：支持 `yield_control()` 让出执行权，并通过 `wait` 工具恢复或终止运行中的脚本
+5. **内容输出**：支持文本、图像等多种输出格式
 
 ### 使用场景
 
-- 需要执行复杂逻辑编排多个工具调用时
-- 需要状态在多次执行间保持时
-- 需要长时间运行并可能产生中间输出的任务
-- 需要程序化控制工具调用流程的场景
+- 需要执行简单 JavaScript 逻辑而不想启动完整 REPL 的场景
+- 需要调用其他 Codex 工具并处理其返回值的自动化脚本
+- 需要长时间运行并间歇性产出输出的任务（配合 `yield_control`）
 
 ---
 
 ## 功能点目的
 
-### 1. `exec` 工具（CodeModeExecuteHandler）
+### 1. `exec` 工具（主入口）
 
-**目的**：执行原始 JavaScript 代码
+**文件**: `execute_handler.rs`
 
-**主要功能**：
-- 接收原始 JavaScript 源代码（非 JSON）
-- 支持通过 pragma 注释配置执行参数：`// @exec: {"yield_time_ms": 10000, "max_output_tokens": 1000}`
-- 在隔离的 VM 中运行代码，无文件系统、网络或 console 访问
-- 返回执行结果或产出（yield）中间结果
+- 接收原始 JavaScript 代码（非 JSON）
+- 支持首行 pragma 配置（`// @exec: {...}`）
+  - `yield_time_ms`: 脚本运行多久后自动让出控制权（默认 10s）
+  - `max_output_tokens`: 输出截断限制（默认 10000 tokens）
+- 在隔离 VM 中执行代码，返回执行结果或产出状态
 
-**全局辅助函数**：
-- `exit()`：立即结束脚本
-- `text(value)`：追加文本输出
-- `image(imageUrlOrItem)`：追加图像输出
-- `store(key, value)` / `load(key)`：状态存储/加载
-- `notify(value)`：实时通知模型
-- `yield_control()`：产出当前结果但继续运行
-- `tools.*`：访问所有启用的嵌套工具
+### 2. `wait` 工具
 
-### 2. `wait` 工具（CodeModeWaitHandler）
+**文件**: `wait_handler.rs`
 
-**目的**：与长时间运行的 `exec` 单元交互
+- 用于恢复或终止正在运行的 `exec` 会话（cell）
+- 参数：
+  - `cell_id`: 要操作的 exec 会话标识
+  - `yield_time_ms`: 等待多久后再次让出（默认 10s）
+  - `max_tokens`: 输出限制
+  - `terminate`: 设为 true 时终止会话
 
-**主要功能**：
-- 通过 `cell_id` 恢复等待中的执行单元
-- 获取新的输出或最终完成结果
-- 支持 `terminate: true` 终止运行中的单元
-- 可配置 `yield_time_ms` 和 `max_tokens` 控制等待行为
+### 3. 嵌套工具调用
 
-### 3. 进程管理（CodeModeService + CodeModeProcess）
+**文件**: `worker.rs`, `mod.rs`
 
-**目的**：管理 Node.js 运行时生命周期
+- JavaScript 代码可通过 `tools.tool_name(args)` 调用其他工具
+- 支持 MCP 工具（通过 `tools.mcp__server__tool_name` 格式）
+- 工具调用是异步的，通过消息传递与主进程通信
 
-**主要功能**：
-- 延迟启动 Node.js 进程
-- 自动检测进程退出并重新启动
-- 管理多个执行单元（cell）
-- 存储值（stored_values）的会话级持久化
+### 4. 状态管理
 
-### 4. 工具桥接（bridge.js + runner.cjs）
+**文件**: `service.rs`
 
-**目的**：在 JavaScript 代码和 Rust 工具系统之间建立桥梁
+- `stored_values`: 跨 exec 调用的键值存储
+- `cell_id`: 会话标识分配
+- 进程生命周期管理（按需启动 Node 进程）
 
-**主要功能**：
-- `bridge.js`：在 VM 中设置全局运行时对象
-- `runner.cjs`：完整的 Node.js 运行时，使用 Worker Threads 和 VM 模块执行代码
-- 处理工具调用请求和响应的序列化
-- 管理内容项（content items）的收集和产出
+### 5. 协议层
+
+**文件**: `protocol.rs`
+
+- 定义 Rust 与 Node.js 进程间的通信协议
+- 消息类型：Start, Poll, Terminate, Response, Yielded, Result, Notify, ToolCall
+
+### 6. JavaScript 运行时
+
+**文件**: `runner.cjs`, `bridge.js`
+
+- `runner.cjs`: Node.js 主进程，管理 Worker 线程和协议转换
+- `bridge.js`: 用户代码包装器，注入全局 API（`tools`, `text`, `image`, `store`, `load`, `exit`, `yield_control`, `notify`）
 
 ---
 
 ## 具体技术实现
 
-### 关键数据结构
+### 关键流程
 
-#### 协议消息类型（protocol.rs）
+#### 1. Exec 执行流程
+
+```
+CodeModeExecuteHandler::execute
+  ├── parse_freeform_args(code)          // 解析 pragma 和代码
+  ├── build_enabled_tools()              // 构建可用工具列表
+  ├── build_source(code, enabled_tools)  // 生成包装后的 JS 代码
+  ├── service.allocate_cell_id()         // 分配会话 ID
+  ├── service.ensure_started()           // 启动 Node 进程（如需要）
+  ├── process.send(Start { ... })        // 发送启动消息
+  └── handle_node_message()              // 处理返回消息
+       ├── Result { ... } → 完成
+       ├── Yielded { ... } → 产出（可后续 wait）
+       └── Terminated { ... } → 终止
+```
+
+#### 2. 嵌套工具调用流程
+
+```
+worker.rs (监听线程)
+  ├── 收到 NodeToHostMessage::ToolCall
+  ├── call_nested_tool()                 // 调用实际工具
+  │     ├── 解析 MCP 工具名或查找本地工具
+  │     ├── ToolCallRuntime::handle_tool_call_with_source()
+  │     └── 返回 AnyToolResult
+  ├── 序列化结果
+  └── 发送 HostToNodeMessage::Response 回 Node 进程
+```
+
+#### 3. Wait 流程
+
+```
+CodeModeWaitHandler::handle
+  ├── 解析参数（cell_id, yield_time_ms, terminate）
+  ├── 根据 terminate 决定发送 Poll 或 Terminate 消息
+  ├── process.send(message)
+  └── handle_node_message() 处理响应
+```
+
+### 数据结构
+
+#### Rust 侧核心结构
 
 ```rust
-// 主机（Rust）到 Node 的消息
-enum HostToNodeMessage {
+// service.rs
+pub(crate) struct CodeModeService {
+    js_repl_node_path: Option<PathBuf>,     // Node 可执行路径
+    stored_values: Mutex<HashMap<String, JsonValue>>,  // 持久化存储
+    process: Arc<Mutex<Option<CodeModeProcess>>>,      // Node 进程
+    next_cell_id: Mutex<u64>,               // 自增会话 ID
+}
+
+// protocol.rs
+pub(super) struct EnabledTool {
+    pub(super) tool_name: String,      // 原始工具名
+    pub(super) global_name: String,    // JS 可用名（规范化后）
+    pub(super) module_path: String,    // 模块路径
+    pub(super) namespace: Vec<String>, // 命名空间
+    pub(super) name: String,           // 工具键名
+    pub(super) description: String,    // 工具描述
+    pub(super) kind: CodeModeToolKind, // Function | Freeform
+}
+
+pub(super) enum HostToNodeMessage {
     Start { request_id, cell_id, tool_call_id, default_yield_time_ms, enabled_tools, stored_values, source, yield_time_ms, max_output_tokens },
     Poll { request_id, cell_id, yield_time_ms },
     Terminate { request_id, cell_id },
     Response { request_id, id, code_mode_result, error_text },
 }
 
-// Node 到主机的消息
-enum NodeToHostMessage {
+pub(super) enum NodeToHostMessage {
     ToolCall { request_id, id, name, input },
     Yielded { request_id, content_items },
     Terminated { request_id, content_items },
     Notify { cell_id, call_id, text },
     Result { request_id, content_items, stored_values, error_text, max_output_tokens_per_exec_call },
 }
-```
 
-#### 执行上下文
-
-```rust
-struct ExecContext {
-    session: Arc<Session>,
-    turn: Arc<TurnContext>,
-}
-
-enum CodeModeSessionProgress {
-    Finished(FunctionToolOutput),
-    Yielded { output: FunctionToolOutput },
-}
-
-enum CodeModeExecutionStatus {
-    Completed,
-    Failed,
-    Running(String),
-    Terminated,
+// process.rs
+pub(super) struct CodeModeProcess {
+    pub(super) child: tokio::process::Child,
+    pub(super) stdin: Arc<Mutex<tokio::process::ChildStdin>>,
+    pub(super) stdout_task: JoinHandle<()>,
+    pub(super) response_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<NodeToHostMessage>>>>,
+    pub(super) message_rx: Arc<Mutex<mpsc::UnboundedReceiver<NodeToHostMessage>>>,
 }
 ```
 
-#### 启用工具描述
+#### JavaScript 侧运行时 API
 
-```rust
-struct EnabledTool {
-    tool_name: String,      // 原始工具名
-    global_name: String,    // JS 标识符（规范化后）
-    module_path: String,    // 模块路径
-    namespace: Vec<String>, // 命名空间
-    name: String,           // 工具键名
-    description: String,
-    kind: CodeModeToolKind, // Function 或 Freeform
-}
+```javascript
+// bridge.js 注入的全局 API
+globalThis.tools    // 工具命名空间，如 tools.shell_command(...)
+globalThis.ALL_TOOLS // 工具元数据数组
+globalThis.text(value)        // 输出文本
+globalThis.image(urlOrObj)    // 输出图片
+globalThis.store(key, value)  // 存储值
+globalThis.load(key)          // 读取值
+globalThis.exit()             // 立即退出
+globalThis.yield_control()    // 让出控制权
+globalThis.notify(value)      // 发送通知消息
+globalThis.console // 空实现（禁用 console）
 ```
 
-### 关键流程
+### 协议细节
 
-#### 1. `exec` 执行流程
+Rust 与 Node 进程通过 stdin/stdout 使用 JSON Lines 协议通信：
 
-```
-1. CodeModeExecuteHandler::handle
-   └─> execute()
-       ├─> parse_freeform_args() 解析 pragma 和代码
-       ├─> build_enabled_tools() 构建可用工具列表
-       ├─> protocol::build_source() 生成完整 JS 代码（bridge + user code）
-       ├─> CodeModeService::ensure_started() 确保 Node 进程运行
-       ├─> CodeModeProcess::send(HostToNodeMessage::Start)
-       └─> handle_node_message() 处理响应
-           ├─> Yielded: 返回中间结果
-           ├─> Result: 返回最终结果，更新 stored_values
-           └─> Terminated: 返回终止结果
-```
+1. **Rust → Node**: 每行一个 JSON 对象，type 字段标识消息类型
+2. **Node → Rust**: 同样 JSON Lines，通过 request_id 关联请求
+3. **异步工具调用**: Node Worker 发送 `tool_call` 消息，Rust 侧在独立 tokio 任务中执行工具，完成后发送 `response`
 
-#### 2. `wait` 执行流程
+### 进程架构
 
 ```
-1. CodeModeWaitHandler::handle
-   └─> 解析参数（cell_id, yield_time_ms, max_tokens, terminate）
-       ├─> 如果 terminate: 发送 Terminate 消息
-       └─> 否则: 发送 Poll 消息
-           └─> handle_node_message() 处理响应
+┌─────────────────┐
+│   Codex (Rust)  │
+│  ┌───────────┐  │
+│  │CodeModeService│
+│  │ ┌───────┐ │  │
+│  │ │Process│ │  │  ← 管理 Node 子进程
+│  │ │ ┌───┐ │ │  │
+│  │ │ │Worker│ │  │  ← 处理工具调用和通知
+│  │ │ └───┘ │ │  │
+│  │ └───────┘ │  │
+│  └───────────┘  │
+└────────┬────────┘
+         │ stdin/stdout (JSON Lines)
+┌────────▼────────┐
+│  Node.js (runner.cjs)  │
+│  ┌───────────┐  │
+│  │ 主线程     │  │  ← 协议解析、会话管理
+│  │ ┌───────┐ │  │
+│  │ │Worker │ │  │  ← VM 执行用户代码
+│  │ │Thread│ │  │
+│  │ └───────┘ │  │
+│  └───────────┘  │
+└─────────────────┘
 ```
-
-#### 3. 嵌套工具调用流程
-
-```
-1. Worker 循环接收 NodeToHostMessage::ToolCall
-2. call_nested_tool()
-   ├─> 检查 MCP 工具或普通工具
-   ├─> 构建 ToolPayload
-   ├─> ToolCallRuntime::handle_tool_call_with_source()
-   └─> 获取结果后发送 HostToNodeMessage::Response
-```
-
-#### 4. Node.js 运行时流程（runner.cjs）
-
-```
-1. 主进程创建 readline 接口监听 stdin
-2. 收到 start 消息：
-   ├─> 创建 Worker（codeModeWorkerMain）
-   ├─> Worker 创建 VM 上下文
-   ├─> 加载工具模块和代码模式模块
-   └─> 执行用户代码
-3. Worker 消息处理：
-   ├─> tool_call: 转发到主进程，等待响应
-   ├─> content_item: 收集到 session.content_items
-   ├─> yield: 发送 yielded 消息
-   ├─> notify: 发送 notify 消息
-   └─> result: 发送 result 消息
-```
-
-### 代码模块组织
-
-| 文件 | 职责 |
-|------|------|
-| `mod.rs` | 模块入口，核心逻辑（参数解析、工具构建、消息处理、输出截断） |
-| `service.rs` | CodeModeService 实现，进程生命周期管理，cell ID 分配 |
-| `process.rs` | CodeModeProcess 实现，Node 进程创建和通信 |
-| `worker.rs` | CodeModeWorker 实现，后台消息处理循环 |
-| `protocol.rs` | 协议消息类型定义，序列化/反序列化，工具描述构建 |
-| `execute_handler.rs` | `exec` 工具处理器实现 |
-| `wait_handler.rs` | `wait` 工具处理器实现 |
-| `execute_handler_tests.rs` | 参数解析单元测试 |
-| `bridge.js` | VM 内运行的桥接代码，设置全局对象 |
-| `runner.cjs` | Node.js 主运行时，Worker 线程管理 |
-| `description.md` | `exec` 工具描述文档 |
-| `wait_description.md` | `wait` 工具描述文档 |
 
 ---
 
 ## 关键代码路径与文件引用
 
-### 核心入口
+### 核心文件
 
-- **工具注册**：`codex-rs/core/src/tools/handlers/mod.rs:34-35`
-  ```rust
-  pub(crate) use crate::tools::code_mode::CodeModeExecuteHandler;
-  pub(crate) use crate::tools::code_mode::CodeModeWaitHandler;
-  ```
+| 文件 | 职责 |
+|------|------|
+| `mod.rs` | 模块入口，定义 ExecContext、CodeModeSessionProgress、CodeModeExecutionStatus，实现工具构建、嵌套工具调用、消息处理 |
+| `service.rs` | CodeModeService 实现，进程管理、cell ID 分配、stored_values 管理 |
+| `process.rs` | Node 进程管理（spawn、stdin/stdout 通信、消息路由） |
+| `protocol.rs` | 通信协议定义（HostToNodeMessage、NodeToHostMessage、EnabledTool） |
+| `worker.rs` | 后台工作线程，处理 ToolCall 和 Notify 消息 |
+| `execute_handler.rs` | `exec` 工具处理器，解析 pragma、启动执行 |
+| `wait_handler.rs` | `wait` 工具处理器，轮询或终止会话 |
+| `runner.cjs` | Node.js 运行时，VM 执行、Worker 管理、协议转换 |
+| `bridge.js` | 用户代码包装器，注入全局 API |
+| `description.md` | `exec` 工具描述文档（给模型看的说明） |
+| `wait_description.md` | `wait` 工具描述文档 |
+| `execute_handler_tests.rs` | 单元测试 |
 
-- **服务创建**：`codex-rs/core/src/codex.rs:1827`
-  ```rust
-  code_mode_service: crate::tools::code_mode::CodeModeService::new(
-      config.js_repl_node_path.clone(),
-  ),
-  ```
+### 关键代码路径
 
-- **服务挂载**：`codex-rs/core/src/state/service.rs:64`
-  ```rust
-  pub(crate) code_mode_service: CodeModeService,
-  ```
+1. **启动 exec 会话**:
+   ```
+   execute_handler.rs:42-99 → service.rs:48-64 (ensure_started) → process.rs:66-161 (spawn_code_mode_process)
+   ```
 
-### 工具描述生成
+2. **发送启动消息**:
+   ```
+   execute_handler.rs:63-73 → process.rs:29-56 (send) → protocol.rs:46-76 (HostToNodeMessage::Start)
+   ```
 
-- **描述模板**：`codex-rs/core/src/tools/code_mode/description.md`
-- **代码模式专用描述**：`codex-rs/core/src/tools/code_mode/mod.rs:72-99`
-- **工具引用生成**：`codex-rs/core/src/tools/code_mode_description.rs`
+3. **处理工具调用**:
+   ```
+   worker.rs:30-115 → mod.rs:301-341 (call_nested_tool) → parallel.rs:75-132 (handle_tool_call_with_source)
+   ```
 
-### 功能开关
+4. **构建可用工具列表**:
+   ```
+   mod.rs:233-243 (build_enabled_tools) → mod.rs:276-298 (build_nested_router)
+   ```
 
-- **Feature::CodeMode**：`codex-rs/core/src/features.rs:89`
-- **Feature::CodeModeOnly**：`codex-rs/core/src/features.rs:91`
-- **功能检查**：`codex-rs/core/src/tools/code_mode/service.rs:73-75`
-
-### 路由器集成
-
-- **嵌套工具过滤**：`codex-rs/core/src/tools/router.rs:66-82`
-- **工具调用源**：`codex-rs/core/src/tools/router.rs:27`
+5. **生成包装代码**:
+   ```
+   protocol.rs:108-120 (build_source) → 替换 bridge.js 中的占位符
+   ```
 
 ---
 
@@ -256,37 +275,34 @@ struct EnabledTool {
 
 | 模块 | 用途 |
 |------|------|
-| `crate::tools::code_mode_description` | 工具描述生成和标识符规范化 |
-| `crate::tools::parallel::ToolCallRuntime` | 嵌套工具调用执行 |
-| `crate::tools::router::ToolRouter` | 工具路由和规格查找 |
-| `crate::tools::context::*` | 工具调用上下文和输出类型 |
-| `crate::tools::registry::*` | 工具处理器注册表 |
-| `crate::features::Feature` | 功能开关检查 |
+| `crate::tools::code_mode_description` | 工具名规范化、描述增强、TypeScript 类型生成 |
+| `crate::tools::parallel::ToolCallRuntime` | 实际执行嵌套工具调用 |
+| `crate::tools::router::ToolRouter` | 工具路由、规格查找 |
+| `crate::tools::registry::ToolHandler` | 处理器 trait |
+| `crate::tools::context::*` | ToolInvocation、ToolPayload、FunctionToolOutput 等 |
+| `crate::features::Feature` | CodeMode、CodeModeOnly 特性开关 |
+| `crate::state::service::SessionServices` | 持有 CodeModeService 实例 |
 | `crate::codex::{Session, TurnContext}` | 会话和回合上下文 |
-| `crate::truncate::*` | 输出截断策略 |
 
 ### 外部依赖
 
 | 依赖 | 用途 |
 |------|------|
-| `tokio` | 异步运行时，进程管理，通道 |
+| `tokio::process` | 异步进程管理 |
+| `tokio::sync::{Mutex, mpsc, oneshot}` | 异步同步原语 |
 | `serde_json` | JSON 序列化/反序列化 |
-| `uuid` | 生成唯一请求 ID |
-| `tracing` | 日志和遥测 |
-| `async_trait` | 异步 trait 支持 |
-| `codex_protocol` | 协议模型（FunctionCallOutputContentItem 等） |
-
-### Node.js 运行时依赖
-
-- **VM 模块**：`node:vm` - 创建隔离上下文
-- **Worker Threads**：`node:worker_threads` - 后台执行
-- **SourceTextModule/SyntheticModule**：ES 模块支持
+| `tracing` | 日志记录 |
+| Node.js (>= v22.22.0) | JavaScript 运行时 |
 
 ### 配置项
 
-- `js_repl_node_path`：Node.js 可执行文件路径（可选）
-- `features.code_mode`：启用代码模式功能
-- `features.code_mode_only`：仅暴露 `exec`/`wait` 工具给模型
+在 `config.toml` 中通过 `[features]` 启用：
+
+```toml
+[features]
+code_mode = true          # 启用 exec/wait 工具
+code_mode_only = true     # 仅暴露 exec/wait 给模型，其他工具需通过 exec 调用
+```
 
 ---
 
@@ -294,90 +310,87 @@ struct EnabledTool {
 
 ### 已知风险
 
-1. **进程崩溃处理**
-   - 风险：Node.js 进程可能因内存不足或 VM 错误而崩溃
-   - 缓解：`ensure_started()` 会检测进程状态并自动重启
-   - 代码：`service.rs:52-55`
+1. **Node 进程单点故障**
+   - 所有 exec 调用共享同一个 Node 进程
+   - 如果进程崩溃，所有正在运行的 cell 都会失败
+   - **缓解**: `ensure_started()` 会检测进程状态并在需要时重启
 
-2. **无限循环/长时间运行**
-   - 风险：用户代码可能无限循环
-   - 缓解：`yield_time_ms` 默认 10 秒，可通过 `wait` 继续或 `terminate` 终止
-   - 边界：最大安全整数限制（2^53 - 1）
+2. **VM 逃逸风险**
+   - 虽然使用 Node.js VM 模块，但仍存在潜在的逃逸风险
+   - `runner.cjs` 中禁用了 `require` 和 `console`，但 VM 模块本身不是完全隔离的
+   - **建议**: 考虑使用更严格的沙箱（如 WebAssembly 或独立进程）
 
-3. **工具调用递归**
-   - 风险：`exec` 调用自身可能导致无限递归
-   - 缓解：`call_nested_tool` 显式拒绝调用 `PUBLIC_TOOL_NAME`
-   - 代码：`mod.rs:308-311`
+3. **内存泄漏**
+   - `stored_values` 只增不减，长期会话可能累积大量数据
+   - **建议**: 添加过期机制或大小限制
 
-4. **存储值大小**
-   - 风险：`stored_values` 可能在会话中无限增长
-   - 缓解：无显式限制，依赖用户代码控制
+4. **并发安全**
+   - 多个 cell 同时运行时的资源竞争
+   - **缓解**: 每个 cell 有独立 Worker，但共享 Node 进程的事件循环
 
-5. **输出截断**
-   - 风险：大输出可能超出模型上下文限制
-   - 缓解：`max_output_tokens` 默认 10000，支持截断策略
+### 边界情况
 
-### 边界条件
-
-| 边界 | 处理 |
-|------|------|
-| 空代码输入 | `parse_freeform_args` 返回错误 |
-| 无效 pragma JSON | 返回详细的解析错误 |
-| 未知 pragma 字段 | 拒绝并列出支持的字段 |
-| 进程启动失败 | 返回 `RespondToModel` 错误 |
-| 单元不存在 | `wait` 返回错误结果 |
-| 工具不存在 | `call_nested_tool` 返回错误 |
+1. **空代码输入**: `parse_freeform_args` 会返回错误
+2. **无效 pragma**: 严格的 JSON 解析，仅支持 `yield_time_ms` 和 `max_output_tokens`
+3. **工具名冲突**: `normalize_code_mode_identifier` 将非法字符替换为 `_`，可能导致冲突
+4. **MCP 工具名**: 使用 `mcp__server__tool` 格式，需正确处理 `split_qualified_tool_name`
 
 ### 改进建议
 
-1. **资源限制**
-   - 添加内存使用限制（通过 Node.js `--max-old-space-size`）
-   - 添加 CPU 时间限制
-   - 添加存储值大小限制
+1. **进程隔离**
+   - 考虑为每个 exec 调用启动独立的 Node 进程，提高隔离性
+   - 或使用 Worker Threads 的 `resourceLimits` 限制内存/CPU
 
-2. **可观测性**
-   - 添加 VM 执行指标（执行时间、内存使用）
-   - 添加工具调用频率统计
-   - 改进错误堆栈跟踪
+2. **超时机制增强**
+   - 当前仅支持 `yield_time_ms`，建议添加绝对执行时间限制
+   - 防止无限循环或长时间运行的脚本
 
-3. **安全性**
-   - 考虑使用更严格的 VM 沙箱（如 `vm2` 替代原生 `vm`）
-   - 添加代码静态分析（检测危险模式）
-   - 限制单次执行的工具调用次数
+3. **存储管理**
+   - 添加 `stored_values` 大小限制和 LRU 淘汰
+   - 支持显式删除键值
 
-4. **性能优化**
-   - 预编译常用工具模块
-   - 复用 Worker 进程（当前每个 cell 创建新 Worker）
-   - 添加代码缓存机制
+4. **调试支持**
+   - 添加 source map 支持，方便调试生成的包装代码
+   - 提供错误堆栈映射回原始代码位置
 
-5. **开发者体验**
-   - 添加调试模式（保留 console.log 输出）
-   - 提供 TypeScript 类型定义
-   - 支持 source map 用于错误定位
+5. **性能优化**
+   - 缓存 `enabled_tools` 构建结果，避免每次 exec 重新构建
+   - 预编译常用工具调用的序列化格式
 
-6. **代码质量**
-   - `runner.cjs` 文件较大（938 行），可考虑拆分为模块
-   - 添加更多单元测试（当前仅 `execute_handler_tests.rs` 有测试）
-   - 添加集成测试验证完整执行流程
+6. **TypeScript 支持**
+   - 当前仅生成 TypeScript 声明，可考虑支持直接执行 TS（通过 esbuild-wasm 等）
+
+7. **测试覆盖**
+   - 当前仅有 `execute_handler_tests.rs`，建议添加：
+     - 集成测试（完整 exec → wait → terminate 流程）
+     - 并发测试（多个 cell 同时运行）
+     - 错误恢复测试（Node 进程崩溃后的行为）
 
 ---
 
-## 附录：关键常量
+## 附录：工具名规范化规则
 
 ```rust
-const CODE_MODE_RUNNER_SOURCE: &str = include_str!("runner.cjs");
-const CODE_MODE_BRIDGE_SOURCE: &str = include_str!("bridge.js");
-const CODE_MODE_DESCRIPTION_TEMPLATE: &str = include_str!("description.md");
-const CODE_MODE_PRAGMA_PREFIX: &str = "// @exec:";
-const CODE_MODE_ONLY_PREFACE: &str = "Use `exec/wait` tool to run all other tools...";
-
-pub(crate) const PUBLIC_TOOL_NAME: &str = "exec";
-pub(crate) const WAIT_TOOL_NAME: &str = "wait";
-pub(crate) const DEFAULT_EXEC_YIELD_TIME_MS: u64 = 10_000;
-pub(crate) const DEFAULT_WAIT_YIELD_TIME_MS: u64 = 10_000;
+// code_mode_description.rs:94-116
+pub(crate) fn normalize_code_mode_identifier(tool_key: &str) -> String {
+    let mut identifier = String::new();
+    for (index, ch) in tool_key.chars().enumerate() {
+        let is_valid = if index == 0 {
+            ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+        } else {
+            ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+        };
+        if is_valid {
+            identifier.push(ch);
+        } else {
+            identifier.push('_');
+        }
+    }
+    if identifier.is_empty() { "_".to_string() } else { identifier }
+}
 ```
 
----
-
-*文档生成时间：2026-03-21*
-*研究范围：codex-rs/core/src/tools/code_mode/*
+示例转换：
+- `shell_command` → `shell_command`
+- `mcp:ologs:get_profile` → `mcp__ologs__get_profile`
+- `123-tool` → `_23_tool`
