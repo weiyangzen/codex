@@ -1744,9 +1744,9 @@ Legend: `[ ]` pending, `[x]` researched.
 - [ ] [FILE] codex-rs/core/src/exec_tests.rs
 - [ ] [FILE] codex-rs/core/src/external_agent_config.rs
 - [ ] [FILE] codex-rs/core/src/external_agent_config_tests.rs
-- [ ] [FILE] codex-rs/core/src/features.rs
-- [ ] [FILE] codex-rs/core/src/features/legacy.rs
-- [ ] [FILE] codex-rs/core/src/features_tests.rs
+- [x] [FILE] codex-rs/core/src/features.rs
+- [x] [FILE] codex-rs/core/src/features/legacy.rs
+- [x] [FILE] codex-rs/core/src/features_tests.rs
 - [ ] [FILE] codex-rs/core/src/file_watcher.rs
 - [ ] [FILE] codex-rs/core/src/file_watcher_tests.rs
 - [ ] [FILE] codex-rs/core/src/flags.rs
