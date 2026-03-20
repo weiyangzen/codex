@@ -1,356 +1,426 @@
-# Research: codex-rs/core/tests/common
-
-## 概述
-
-`codex-rs/core/tests/common` 是 Codex Rust 核心库的集成测试基础设施， crate 名为 `core_test_support`。它提供了一套完整的测试支持工具，用于构建端到端（E2E）测试、模拟外部依赖（如 OpenAI API）、管理测试生命周期以及验证系统行为。
-
----
+# DIR codex-rs/core/tests/common 研究文档
 
 ## 场景与职责
 
-### 核心职责
+`codex-rs/core/tests/common` 是 Codex Rust 核心库的集成测试基础设施目录，作为 `core_test_support` crate 提供测试共享工具集。该目录的主要职责包括：
 
-1. **测试基础设施提供**: 为 `codex-rs/core/tests/suite/` 中的 85+ 个集成测试提供共享的测试工具和模拟设施
-2. **Mock 服务器管理**: 提供基于 `wiremock` 的 HTTP Mock 服务器，用于模拟 OpenAI Responses API 和 Models API
-3. **WebSocket 测试支持**: 支持实时对话功能的 WebSocket 测试服务器
-4. **测试数据构建**: 提供便捷的 SSE 事件构造器、请求/响应数据构建器
-5. **环境隔离**: 通过临时目录和配置覆盖确保测试的隔离性和可重复性
+1. **测试基础设施提供**：为 `codex-core` 的集成测试提供统一的测试辅助函数、Mock 服务器和测试数据构建器
+2. **测试环境隔离**：通过临时目录、配置覆盖和环境变量控制，确保测试的独立性和可重复性
+3. **Mock 服务模拟**：提供 HTTP SSE 流、WebSocket、MCP 服务器等的 Mock 实现，支持离线测试
+4. **测试断言辅助**：提供针对 Codex 协议特定的断言工具和快照格式化功能
 
-### 使用场景
-
-- **单元测试**: 模块内部的自测试（如 `responses.rs` 中的 `validate_request_body_invariants`）
-- **集成测试**: 与 `codex_core` 库的完整交互测试
-- **端到端测试**: 模拟完整的用户会话流程
-- **回归测试**: 通过快照测试验证输出稳定性
-
----
+该目录被设计为独立的测试支持 crate，被多个测试文件引用（约 80+ 个测试文件依赖此 crate）。
 
 ## 功能点目的
 
-### 1. 核心测试框架 (`lib.rs`)
+### 1. 测试 Codex 实例构建 (`test_codex.rs`)
 
-| 功能 | 目的 |
-|------|------|
-|`load_default_config_for_test`|创建隔离的测试配置，使用临时目录避免污染用户真实的 `~/.codex`|
-|`wait_for_event`/`wait_for_event_with_timeout`|异步等待 Codex 线程事件，用于测试异步流程|
-|`fs_wait` 模块|文件系统监控工具，等待文件创建或匹配条件|
-|`skip_if_sandbox!`/`skip_if_no_network!`|条件跳过宏，处理沙盒和网络限制环境|
-|`load_sse_fixture`|从 JSON fixture 加载 SSE 流数据|
+**目的**：提供流畅的 API 来构建和配置测试用的 Codex 实例。
 
-### 2. TestCodex 构建器 (`test_codex.rs`)
+**核心类型**：
+- `TestCodexBuilder`：构建器模式，支持链式配置（模型、认证、预构建钩子、用户 Shell 覆盖等）
+- `TestCodex`：封装测试 Codex 实例，提供便捷的文件路径访问和对话提交方法
+- `TestCodexHarness`：组合 Mock 服务器和 TestCodex，提供一站式测试环境
 
-提供流式 API 构建测试环境：
+**关键功能**：
+- 支持多种服务器类型（wiremock MockServer、StreamingSseServer、WebSocketTestServer）
+- 支持会话恢复（resume from rollout）
+- 支持用户 Shell 覆盖（用于测试不同 Shell 行为）
+- 自动配置测试模型目录（用于实验性工具测试）
 
-```rust
-let test = test_codex()
-    .with_model("gpt-5.1-codex")
-    .with_config(|c| c.approval_policy = AskForApproval::Never)
-    .build(&mock_server)
-    .await?;
-```
+### 2. codex-exec 测试构建器 (`test_codex_exec.rs`)
 
-**关键特性**:
-- 支持从 rollout 文件恢复会话 (`resume`)
-- 支持自定义用户 shell (`with_user_shell`)
-- 支持 WebSocket 服务器 (`build_with_websocket_server`)
-- 支持流式 SSE 服务器 (`build_with_streaming_server`)
+**目的**：专门用于测试 `codex-exec` 二进制文件的命令构建器。
+
+**核心类型**：
+- `TestCodexExecBuilder`：构建 `assert_cmd::Command` 实例，预设临时 home/work 目录和虚拟 API Key
 
 ### 3. Mock 响应服务器 (`responses.rs`)
 
-提供完整的 OpenAI API 模拟：
+**目的**：提供完整的 OpenAI Responses API Mock 实现，支持 SSE 流和 WebSocket。
 
-**SSE 事件构造器**:
-- `ev_completed()` - 响应完成事件
-- `ev_function_call()` - 函数调用事件
-- `ev_apply_patch_call()` - 代码补丁应用调用（支持多种输出格式）
-- `ev_reasoning_item()` - 推理项目事件
-- `ev_web_search_call_done()` - 网页搜索调用
+**核心类型**：
+- `ResponseMock`：捕获和验证 HTTP 请求，提供请求体解析和断言方法
+- `ResponsesRequest`：封装 wiremock 请求，提供便捷的 JSON 访问和字段提取
+- `WebSocketTestServer`：WebSocket 测试服务器，支持多连接、请求/响应序列
+- `ModelsMock`：模型列表 API 的 Mock
 
-**Mock 挂载辅助函数**:
-- `mount_sse_once()` - 单次 SSE 响应
-- `mount_sse_sequence()` - 顺序响应序列
-- `mount_compact_json_once()` - 上下文压缩响应
-- `start_mock_server()` - 启动默认 Mock 服务器
+**事件构造器**：
+- `ev_completed`、`ev_response_created`：基础响应事件
+- `ev_function_call`、`ev_custom_tool_call`：工具调用事件
+- `ev_apply_patch_call`：支持多种输出格式的 apply_patch 调用
+- `ev_reasoning_item`、`ev_reasoning_text_delta`：推理相关事件
+- `ev_web_search_call`、`ev_image_generation_call`：搜索和图像生成事件
 
-**请求验证**:
-- `ResponseMock` 捕获并验证请求内容
-- `ResponsesRequest` 提供丰富的请求内容查询方法
-- `validate_request_body_invariants()` 验证请求体完整性（防止孤儿调用输出）
+**Mock 挂载辅助函数**：
+- `mount_sse_once`、`mount_sse_sequence`：挂载 SSE 响应
+- `mount_compact_*`：挂载上下文压缩 API 响应
+- `mount_models_once`：挂载模型列表响应
+- `start_mock_server`：启动默认配置的 Mock 服务器
 
 ### 4. 流式 SSE 服务器 (`streaming_sse.rs`)
 
-轻量级 HTTP 服务器，支持：
-- 基于 gate 的流控（允许测试精确控制数据发送时机）
-- `/v1/models` 和 `/v1/responses` 端点
-- 完成通知机制（`oneshot::Receiver<i64>`）
+**目的**：提供细粒度控制的流式 SSE 测试服务器，支持分块门控（gated chunk delivery）。
 
-### 5. WebSocket 测试服务器 (`responses.rs`)
+**核心类型**：
+- `StreamingSseServer`：轻量级 HTTP 服务器，支持 GET /v1/models 和 POST /v1/responses
+- `StreamingSseChunk`：带可选门控信号的 SSE 块
 
-- `start_websocket_server()` - 启动 WebSocket 测试服务器
-- 支持 deflate 压缩扩展
-- 支持自定义响应头
-- 支持连接延迟模拟（用于测试 warmup 路径）
+**使用场景**：
+- 测试流式响应处理
+- 测试超时和取消逻辑
+- 测试背压（backpressure）处理
 
-### 6. 上下文快照 (`context_snapshot.rs`)
+### 5. 上下文快照格式化 (`context_snapshot.rs`)
 
-用于测试输出的快照比较：
+**目的**：将 Codex 请求/响应项格式化为可读的快照文本，用于测试断言和调试。
 
-| 渲染模式 | 说明 |
-|---------|------|
-|`RedactedText`|默认模式，敏感内容替换为占位符|
-|`FullText`|完整文本保留|
-|`KindOnly`|仅显示消息类型|
-|`KindWithTextPrefix`|显示类型和前 N 个字符|
+**核心类型**：
+- `ContextSnapshotOptions`：配置快照渲染选项（渲染模式、能力指令剥离等）
+- `ContextSnapshotRenderMode`：渲染模式枚举（RedactedText、FullText、KindOnly、KindWithTextPrefix）
 
-**自动归一化**:
-- 路径归一化（系统技能路径 → `<SYSTEM_SKILLS_ROOT>`）
-- 指令占位符（`<APPS_INSTRUCTIONS>`, `<SKILLS_INSTRUCTIONS>` 等）
-- 环境上下文简化
+**格式化能力**：
+- 消息项（message）：角色、内容类型、文本内容
+- 函数调用（function_call）：函数名
+- 函数调用输出（function_call_output）：输出内容
+- 本地 Shell 调用（local_shell_call）：命令
+- 推理项（reasoning）：摘要、加密内容标记
+- 压缩项（compaction）：加密内容标记
 
-### 7. Apps 测试服务器 (`apps_test_server.rs`)
+**规范化处理**：
+- 动态路径规范化（系统技能路径替换为 `<SYSTEM_SKILLS_ROOT>`）
+- 能力指令占位符替换（`<APPS_INSTRUCTIONS>`、`<SKILLS_INSTRUCTIONS>` 等）
+- AGENTS.md 指令占位符
+- 环境上下文占位符
 
-模拟 ChatGPT Apps/Connectors 服务：
-- OAuth 元数据端点
-- Connectors 目录列表
-- MCP (Model Context Protocol) JSON-RPC 端点
-- 支持可搜索工具（100+ 工具模拟）
+### 6. 应用测试服务器 (`apps_test_server.rs`)
+
+**目的**：模拟 Codex Apps (MCP) 服务器，用于测试连接器功能。
+
+**核心类型**：
+- `AppsTestServer`：配置 Mock 服务器以响应 Apps 协议
+
+**模拟端点**：
+- `/.well-known/oauth-authorization-server/mcp`：OAuth 元数据
+- `/connectors/directory/list`：连接器目录
+- `/api/codex/apps`：JSON-RPC 端点（initialize、tools/list、tools/call）
+
+### 7. 进程管理工具 (`process.rs`)
+
+**目的**：提供进程生命周期管理的测试辅助函数。
+
+**功能**：
+- `wait_for_pid_file`：等待 PID 文件创建并读取
+- `process_is_alive`：检查进程是否存活（使用 `kill -0`）
+- `wait_for_process_exit`：等待进程退出
 
 ### 8. Zsh Fork 运行时 (`zsh_fork.rs`)
 
-支持 zsh fork 模式的测试：
-- 通过 DotSlash 获取测试用 zsh
-- EXEC_WRAPPER 拦截支持检测
-- 受限沙盒策略构建
+**目的**：支持 Zsh fork 模式的测试配置。
 
-### 9. 进程管理 (`process.rs`)
+**核心类型**：
+- `ZshForkRuntime`：封装 Zsh 路径和 execve wrapper 路径
 
-- `wait_for_pid_file()` - 等待 PID 文件创建
-- `process_is_alive()` - 检测进程存活
-- `wait_for_process_exit()` - 等待进程退出
+**功能**：
+- 自动查找测试用 Zsh（通过 DotSlash）
+- 检测 EXEC_WRAPPER 支持
+- 配置 Shell 工具和 Zsh fork 功能
 
-### 10. 分布式追踪 (`tracing.rs`)
+### 9. 分布式追踪 (`tracing.rs`)
 
-- `install_test_tracing()` - 安装 OpenTelemetry 测试追踪器
-- 支持测试中的分布式追踪上下文
+**目的**：为测试提供 OpenTelemetry 追踪支持。
 
----
+**核心类型**：
+- `TestTracingContext`：持有追踪提供者和订阅者守卫
+- `install_test_tracing`：安装测试追踪订阅者
+
+### 10. 文件系统等待工具 (`lib.rs` 中的 `fs_wait` 模块)
+
+**目的**：异步等待文件系统事件。
+
+**功能**：
+- `wait_for_path_exists`：等待路径创建
+- `wait_for_matching_file`：等待匹配条件的文件出现
+
+### 11. 测试宏 (`lib.rs`)
+
+**提供的宏**：
+- `skip_if_sandbox!`：在 Seatbelt 沙箱中跳过测试
+- `skip_if_no_network!`：在网络禁用时跳过测试
+- `codex_linux_sandbox_exe_or_skip!`：Linux 沙箱二进制不可用时跳过
+- `skip_if_windows!`：Windows 平台跳过
+
+### 12. 全局测试初始化 (`lib.rs`)
+
+**ctor 初始化**：
+- `enable_deterministic_unified_exec_process_ids_for_tests`：启用确定性进程 ID
+- `configure_insta_workspace_root_for_snapshot_tests`：配置 insta 快照工作区根目录
 
 ## 具体技术实现
 
-### 关键数据结构
-
-```rust
-// TestCodex 实例 - 代表一个完整的测试环境
-pub struct TestCodex {
-    pub home: Arc<TempDir>,           // 隔离的 CODEX_HOME
-    pub cwd: Arc<TempDir>,            // 测试工作目录
-    pub codex: Arc<CodexThread>,      // 核心线程实例
-    pub session_configured: SessionConfiguredEvent,
-    pub config: Config,
-    pub thread_manager: Arc<ThreadManager>,
-}
-
-// Mock 响应捕获
-pub struct ResponseMock {
-    requests: Arc<Mutex<Vec<ResponsesRequest>>>,
-}
-
-// WebSocket 连接配置
-pub struct WebSocketConnectionConfig {
-    pub requests: Vec<Vec<Value>>,           // 每个请求的事件序列
-    pub response_headers: Vec<(String, String)>,
-    pub accept_delay: Option<Duration>,      // 握手延迟
-    pub close_after_requests: bool,          // 是否发送 close 帧
-}
-```
-
 ### 关键流程
 
-**测试构建流程**:
-1. `TestCodexBuilder::build()` → 创建临时目录
-2. `prepare_config()` → 加载默认配置 + 应用覆盖
-3. `build_from_config()` → 创建 ThreadManager
-4. `thread_manager.start_thread()` → 启动 CodexThread
-5. 返回 `TestCodex` 实例
+#### 1. TestCodex 构建流程
 
-**SSE Mock 流程**:
-1. `start_mock_server()` → 启动 wiremock 服务器
-2. `mount_sse_once()` → 挂载 SSE 响应到 `/v1/responses`
-3. 测试提交用户输入 → Codex 发送 HTTP 请求
-4. `ResponseMock` 捕获请求并验证
-5. Mock 服务器返回 SSE 流
-
-**请求不变量验证** (`validate_request_body_invariants`):
-```rust
-// 验证每个 function_call_output 都有对应的 function_call
-// 验证每个 custom_tool_call_output 都有对应的 custom_tool_call
-// 验证每个 tool_search_output 都有对应的 tool_search_call
-// 反之亦然（对称性验证）
+```
+TestCodexBuilder::new()
+  ├── with_config() / with_model() / with_auth() / with_pre_build_hook()
+  └── build(&mock_server)
+       ├── 创建临时 home 目录
+       ├── 加载默认测试配置 (load_default_config_for_test)
+       ├── 应用配置修改器
+       ├── 设置模型提供者（指向 Mock 服务器）
+       ├── 执行预构建钩子
+       ├── 创建 ThreadManager
+       └── 启动新线程或恢复已有线程
+            └── 返回 TestCodex { home, cwd, codex, session_configured, thread_manager }
 ```
 
----
+#### 2. SSE Mock 响应流程
+
+```
+start_mock_server()
+  ├── 创建 wiremock MockServer
+  └── 挂载默认 /models 响应
+
+mount_sse_once(&server, body)
+  ├── 创建 ResponseMock（请求捕获器）
+  ├── 创建 Mock：POST 方法 + /responses 路径 + ResponseMock
+  └── 挂载到服务器，返回 ResponseMock
+
+测试执行时：
+  ├── 客户端发送 POST /v1/responses
+  ├── ResponseMock::matches() 捕获请求并验证不变量
+  ├── 返回预配置的 SSE 响应体
+  └── 测试通过 ResponseMock 验证请求内容
+```
+
+#### 3. WebSocket Mock 流程
+
+```
+start_websocket_server(connections)
+  ├── 绑定 TCP 监听器
+  ├── 创建连接日志和握手日志
+  └── 启动异步任务处理连接
+       ├── 接受 TCP 连接
+       ├── 执行 WebSocket 握手（可选延迟）
+       ├── 记录握手信息
+       └── 循环处理请求/响应
+            ├── 接收 WebSocket 消息
+            ├── 记录请求
+            ├── 发送预配置的响应事件
+            └── 可选关闭连接
+```
+
+#### 4. 请求体验证不变量
+
+```rust
+validate_request_body_invariants(request)
+  ├── 解析请求体 JSON
+  ├── 提取 input 数组
+  ├── 收集各类调用 ID：
+  │   ├── function_calls
+  │   ├── custom_tool_calls
+  │   ├── tool_search_calls
+  │   └── local_shell_calls
+  ├── 收集各类输出 ID：
+  │   ├── function_call_outputs
+  │   ├── custom_tool_call_outputs
+  │   └── tool_search_outputs
+  └── 验证对称性：
+      ├── 每个输出必须有对应的调用
+      └── 每个调用必须有对应的输出
+```
+
+### 关键数据结构
+
+#### `TestCodexBuilder` 配置
+
+```rust
+pub struct TestCodexBuilder {
+    config_mutators: Vec<Box<dyn FnOnce(&mut Config) + Send>>,
+    auth: CodexAuth,
+    pre_build_hooks: Vec<Box<dyn FnOnce(&Path) + Send + 'static>>,
+    home: Option<Arc<TempDir>>,
+    user_shell_override: Option<Shell>,
+}
+```
+
+#### `ResponsesRequest` 请求封装
+
+```rust
+#[derive(Debug, Clone)]
+pub struct ResponsesRequest(wiremock::Request);
+
+// 主要方法：
+// - body_json() -> Value：获取解析后的 JSON 请求体
+// - input() -> Vec<Value>：获取 input 数组
+// - function_call_output(call_id) -> Value：获取特定调用的输出
+// - message_input_texts(role) -> Vec<String>：获取指定角色的输入文本
+// - header(name) -> Option<String>：获取请求头
+```
+
+#### `WebSocketConnectionConfig` WebSocket 配置
+
+```rust
+pub struct WebSocketConnectionConfig {
+    pub requests: Vec<Vec<Value>>,  // 每个请求对应的响应事件序列
+    pub response_headers: Vec<(String, String)>,
+    pub accept_delay: Option<Duration>,
+    pub close_after_requests: bool,
+}
+```
+
+### 协议支持
+
+#### SSE (Server-Sent Events)
+
+- 格式：`event: <type>\ndata: <json>\n\n`
+- 支持的事件类型：
+  - `response.created`、`response.completed`、`response.failed`
+  - `response.output_item.added`、`response.output_item.done`
+  - `response.output_text.delta`
+  - `response.reasoning_text.delta`、`response.reasoning_summary_text.delta`
+
+#### WebSocket
+
+- 基于 `tokio-tungstenite` 实现
+- 支持 permessage-deflate 压缩扩展
+- 消息格式：JSON 文本帧
+
+#### MCP (Model Context Protocol)
+
+- JSON-RPC 2.0 协议
+- 支持方法：initialize、tools/list、tools/call、notifications/initialized
+- 流式 HTTP 传输
 
 ## 关键代码路径与文件引用
 
-### 文件清单
+### 核心文件
 
 | 文件 | 行数 | 职责 |
-|-----|------|------|
-|`lib.rs`|524|核心测试基础设施、配置加载、事件等待、宏定义|
-|`test_codex.rs`|640|TestCodex 构建器、TestCodexHarness、测试流程封装|
-|`responses.rs`|1628|Mock 服务器、SSE 构造器、WebSocket 服务器、请求验证|
-|`streaming_sse.rs`|693|流式 SSE 测试服务器（轻量级替代 wiremock）|
-|`context_snapshot.rs`|602|快照格式化、输出归一化|
-|`apps_test_server.rs`|306|ChatGPT Apps Mock 服务器|
-|`zsh_fork.rs`|124|Zsh fork 模式测试支持|
-|`process.rs`|48|进程生命周期管理|
-|`test_codex_exec.rs`|48|codex-exec CLI 测试构建器|
-|`tracing.rs`|26|OpenTelemetry 测试追踪|
-|`Cargo.toml`|38|依赖声明|
-|`BUILD.bazel`|10|Bazel 构建配置|
+|------|------|------|
+| `lib.rs` | 524 | 模块导出、测试工具函数、宏定义、全局初始化 |
+| `test_codex.rs` | 640 | TestCodexBuilder、TestCodex、TestCodexHarness |
+| `responses.rs` | 1628 | Mock 服务器、请求捕获、事件构造器、请求体验证 |
+| `streaming_sse.rs` | 693 | 流式 SSE 测试服务器 |
+| `context_snapshot.rs` | 602 | 上下文快照格式化 |
 
-### 关键依赖
+### 辅助文件
 
-```toml
-wiremock = "..."           # HTTP Mock 服务器
-tokio-tungstenite = "..."  # WebSocket 支持
-notify = "..."             # 文件系统监控
-zstd = "..."               # 请求体压缩解码
-```
+| 文件 | 行数 | 职责 |
+|------|------|------|
+| `test_codex_exec.rs` | 48 | codex-exec 二进制测试构建器 |
+| `apps_test_server.rs` | 306 | Codex Apps (MCP) Mock 服务器 |
+| `process.rs` | 48 | 进程管理工具 |
+| `zsh_fork.rs` | 124 | Zsh fork 测试运行时 |
+| `tracing.rs` | 26 | OpenTelemetry 测试追踪 |
 
-### 外部调用关系
+### 配置文件
 
-**被调用方** (来自 `codex_core`):
-- `CodexThread::submit()` - 提交用户输入
-- `ThreadManager::start_thread()` - 启动会话
-- `test_support::set_deterministic_process_ids()` - 测试模式
+| 文件 | 职责 |
+|------|------|
+| `Cargo.toml` | crate 配置，声明依赖（wiremock、tokio、serde_json 等） |
+| `BUILD.bazel` | Bazel 构建配置，引用模型可用性 fixtures |
 
-**调用方** (测试套件):
-- `codex-rs/core/tests/suite/*.rs` - 85+ 个测试文件
-- `codex-rs/core/tests/responses_headers.rs` - 响应头测试
+### 被调用方（测试文件引用）
 
----
+该 crate 被以下主要测试模块引用：
+
+- `codex-rs/core/tests/suite/*.rs`（约 70+ 个测试文件）
+- `codex-rs/exec/tests/suite/*.rs`
+- `codex-rs/app-server/tests/suite/*.rs`
+- `codex-rs/login/tests/suite/*.rs`
+- `codex-rs/mcp-server/tests/suite/*.rs`
 
 ## 依赖与外部交互
 
 ### 内部依赖
 
-```
-core_test_support (本 crate)
-├── codex-core          # 被测试的核心库
-├── codex-protocol      # 协议类型定义
-├── codex-utils-cargo-bin   # 二进制文件定位
-└── codex-utils-absolute-path  # 路径处理
-```
+| Crate | 用途 |
+|-------|------|
+| `codex-core` | 被测试的核心库，提供 CodexThread、Config、ThreadManager 等 |
+| `codex-protocol` | 协议类型定义（EventMsg、Op、ResponseItem 等） |
+| `codex-utils-absolute-path` | 绝对路径类型 |
+| `codex-utils-cargo-bin` | 二进制文件路径解析（支持 Cargo 和 Bazel） |
 
-### 外部服务模拟
+### 外部依赖
 
-| 服务 | 模拟方式 | 文件 |
-|-----|---------|------|
-|OpenAI Responses API|wiremock Mock|`responses.rs`|
-|OpenAI Models API|wiremock Mock|`responses.rs`|
-|WebSocket Realtime API|tokio-tungstenite|`responses.rs`|
-|ChatGPT Apps|MCP JSON-RPC|`apps_test_server.rs`|
+| Crate | 用途 |
+|-------|------|
+| `wiremock` | HTTP Mock 服务器 |
+| `tokio` / `tokio-tungstenite` | 异步运行时和 WebSocket |
+| `serde_json` | JSON 序列化/反序列化 |
+| `tempfile` | 临时目录管理 |
+| `notify` | 文件系统事件监听 |
+| `regex-lite` | 正则表达式处理 |
+| `zstd` | 请求体压缩解码 |
+| `opentelemetry` / `tracing-opentelemetry` | 分布式追踪 |
 
-### 环境依赖
+### 环境交互
 
-- `codex-linux-sandbox` 二进制（Linux 测试）
-- `codex-execve-wrapper` 二进制（zsh fork 测试）
-- `zsh` DotSlash 文件（zsh fork 测试）
-- `dotslash` 工具（获取依赖）
-
----
+- **文件系统**：创建临时目录、读取 fixtures、监听文件变化
+- **网络**：绑定本地端口提供 Mock 服务
+- **进程**：执行 dotslash 获取依赖、检查进程存活
+- **环境变量**：`INSTA_WORKSPACE_ROOT`、`CODEX_HOME`、`EXEC_WRAPPER`
 
 ## 风险、边界与改进建议
 
-### 已知风险
+### 风险点
 
-1. **测试隔离性**: 使用 `ctor` 设置全局测试模式，可能影响并行测试
-   ```rust
-   #[ctor]
-   fn enable_deterministic_unified_exec_process_ids_for_tests() { ... }
-   ```
+1. **测试间状态泄漏**
+   - 风险：全局状态（如 `test_support` 模式、环境变量）可能影响后续测试
+   - 缓解：使用 `#[ctor]` 初始化确保每个测试进程独立；使用临时目录隔离文件状态
 
-2. **平台差异**: 部分功能仅支持特定平台（如 zsh fork 仅 Linux/macOS）
+2. **Mock 服务器竞争条件**
+   - 风险：多个测试同时启动 Mock 服务器可能导致端口冲突
+   - 缓解：wiremock 自动分配端口；自定义服务器绑定到 `127.0.0.1:0`
 
-3. **超时硬编码**: `wait_for_event_with_timeout` 中有硬编码的 10 秒最小超时
+3. **请求体验证过于严格**
+   - 风险：`validate_request_body_invariants` 中的断言可能导致测试崩溃而非失败
+   - 现状：已在 `ResponseMock::matches` 中调用，panic 会中断测试
 
-4. **Panics 用于断言**: 部分验证使用 `panic!` 而非返回 `Result`，可能导致测试崩溃
+4. **平台特定代码**
+   - 风险：Linux 沙箱、Zsh fork 等功能在其他平台不可用
+   - 缓解：使用条件编译和跳过宏（`skip_if_windows!`、`codex_linux_sandbox_exe_or_skip!`）
 
-### 边界条件
+### 边界情况
 
-- **并发限制**: `ResponseMock` 使用 `Mutex<Vec<...>>`，高并发测试可能阻塞
-- **内存使用**: `BodyPrintLimit::Limited(80_000)` 限制请求体打印大小
-- **zstd 解码**: 请求体验证时自动解码 zstd，失败时 panic
+1. **超时处理**
+   - `wait_for_event_with_timeout` 默认最小 10 秒超时
+   - `fs_wait` 模块使用可配置超时（默认 30 秒）
+
+2. **大请求体处理**
+   - wiremock 配置 `BodyPrintLimit::Limited(80_000)` 限制请求体打印
+   - zstd 压缩请求体自动解码
+
+3. **并发连接**
+   - WebSocketTestServer 支持多连接，但按 FIFO 顺序消费配置
+   - StreamingSseServer 每个连接独立处理
 
 ### 改进建议
 
-1. **增强可观测性**:
-   - 为 Mock 服务器添加结构化日志输出
-   - 支持请求/响应的详细追踪模式
+1. **增强文档**
+   - 为复杂的构建器模式添加更多使用示例
+   - 记录每个事件构造器的预期 JSON 格式
 
-2. **性能优化**:
-   - 考虑使用 `RwLock` 替代 `Mutex` 提高并发性能
-   - 流式 SSE 服务器可支持 HTTP/2 多路复用
+2. **性能优化**
+   - 考虑使用连接池复用 Mock 服务器实例（当前每个测试独立启动）
+   - 延迟初始化重型资源（如 OpenTelemetry 追踪）
 
-3. **功能扩展**:
-   - 添加 gRPC Mock 支持（为未来可能的后端迁移准备）
-   - 支持模拟网络延迟和故障注入
+3. **可维护性**
+   - 将 `responses.rs` 拆分为多个子模块（事件构造器、Mock 类型、验证逻辑）
+   - 提取通用的请求体验证逻辑到独立 crate
 
-4. **可维护性**:
-   - `responses.rs` 已达 1628 行，建议拆分为子模块（`sse.rs`, `websocket.rs`, `models.rs`）
-   - 提取公共的 HTTP 服务器启动逻辑
+4. **功能扩展**
+   - 添加对 gRPC 或 HTTP/2 的 Mock 支持（如果未来协议需要）
+   - 支持更复杂的请求匹配（如 JSON Schema 验证）
 
-5. **文档完善**:
-   - 为复杂的 SSE 事件构造器添加更多示例
-   - 文档化 `ContextSnapshotRenderMode` 的使用场景
-
----
-
-## 附录：使用示例
-
-### 基础测试模式
-
-```rust
-#[tokio::test]
-async fn test_basic_flow() -> anyhow::Result<()> {
-    let server = responses::start_mock_server().await;
-    let mock = responses::mount_sse_once(
-        &server,
-        responses::sse(vec![
-            responses::ev_response_created("resp-1"),
-            responses::ev_function_call("call-1", "shell", r#"{"command":["echo","hello"]}"#),
-            responses::ev_completed("resp-1"),
-        ])
-    ).await;
-
-    let test = test_codex().build(&server).await?;
-    test.submit_turn("run echo hello").await?;
-
-    let request = mock.single_request();
-    assert!(request.has_function_call("call-1"));
-    Ok(())
-}
-```
-
-### 使用 TestCodexHarness
-
-```rust
-#[tokio::test]
-async fn test_with_harness() -> anyhow::Result<()> {
-    let harness = TestCodexHarness::with_config(|c| {
-        c.model = Some("gpt-5.1-codex".to_string());
-    }).await?;
-
-    harness.submit("hello").await?;
-    
-    let bodies = harness.request_bodies().await;
-    assert_eq!(bodies.len(), 1);
-    Ok(())
-}
-```
+5. **错误处理**
+   - 将 `validate_request_body_invariants` 中的 panic 改为返回 Result，允许测试优雅失败
+   - 添加更详细的诊断信息当 Mock 响应不匹配时
 
 ---
 
-*Generated: 2026-03-21*
-*Research Scope: codex-rs/core/tests/common/*
+*研究日期：2026-03-21*
+*模型：k2p5*
