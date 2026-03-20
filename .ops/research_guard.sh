@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/home/sansha/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/path:/home/sansha/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export PATH="/home/sansha/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT="$(basename "$REPO")"
@@ -13,14 +13,14 @@ BLOCK_FILE="$LOG_DIR/research_guard.block_count"
 LOCK_FILE="/tmp/${PROJECT}_research_guard.lock"
 CHECKLIST_FILE="$REPO/Docs/researches/blueprint_checklist.md"
 AUTO_CLEANUP_ON_COMPLETE="${AUTO_CLEANUP_ON_COMPLETE:-0}"
-KIMI_EXEC_TIMEOUT_SECONDS="${KIMI_EXEC_TIMEOUT_SECONDS:-${CODEX_EXEC_TIMEOUT_SECONDS:-5400}}"
+KIMI_EXEC_TIMEOUT_SECONDS="${KIMI_EXEC_TIMEOUT_SECONDS:-1200}"
 AUTO_PUSH_ON_CHECKPOINT="${AUTO_PUSH_ON_CHECKPOINT:-0}"
 MAX_BATCH_BYTES="${MAX_BATCH_BYTES:-102400}"
 TMUX_WRAP_ENABLED="${TMUX_WRAP_ENABLED:-1}"
 TMUX_SESSION_NAME="${TMUX_SESSION_NAME:-$PROJECT}"
 WORKER_MODE="${RESEARCH_GUARD_WORKER:-0}"
 KIMI_MODEL="${KIMI_MODEL:-k2p5}"
-KIMI_KEYS_FILE="${KIMI_KEYS_FILE:-$HOME/kimi_keys.txt}"
+KIMI_KEYS_FILE="$HOME/kimi_keys.txt"
 KIMI_KEY_INDEX_FILE="$LOG_DIR/research_guard.kimi_key_index"
 
 mkdir -p "$LOG_DIR" "$REPO/Docs/researches"
@@ -98,6 +98,7 @@ run_research_with_kimi() {
         OPENAI_API_KEY="$key" \
         "$KIMI_BIN" \
         --print \
+        --yolo \
         --model "$KIMI_MODEL" \
         --work-dir "$REPO" \
         --prompt "$task" >> "$LOG_FILE" 2>&1 || rc=$?
@@ -108,6 +109,7 @@ run_research_with_kimi() {
         OPENAI_API_KEY="$key" \
         "$KIMI_BIN" \
         --print \
+        --yolo \
         --model "$KIMI_MODEL" \
         --work-dir "$REPO" \
         --prompt "$task" >> "$LOG_FILE" 2>&1 || rc=$?
