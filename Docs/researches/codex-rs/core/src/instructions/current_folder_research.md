@@ -1,76 +1,66 @@
 # Research: codex-rs/core/src/instructions
 
-## 目录
-- [场景与职责](#场景与职责)
-- [功能点目的](#功能点目的)
-- [具体技术实现](#具体技术实现)
-- [关键代码路径与文件引用](#关键代码路径与文件引用)
-- [依赖与外部交互](#依赖与外部交互)
-- [风险、边界与改进建议](#风险边界与改进建议)
+## 概述
+
+`codex-rs/core/src/instructions` 目录是 Codex 核心库中负责**指令封装与序列化**的模块。它将项目级文档（AGENTS.md）和 Skill 指令转换为模型可消费的 `ResponseItem` 格式，是连接用户配置与 LLM 交互的关键桥梁。
 
 ---
 
 ## 场景与职责
 
-`codex-rs/core/src/instructions` 模块是 Codex CLI 项目中负责**指令注入**的核心组件。其主要职责包括：
+### 核心场景
 
-1. **用户指令封装**：将项目级文档（`AGENTS.md`）和配置中的用户指令封装成标准化的消息格式，注入到对话上下文中
-2. **Skill 指令注入**：将用户通过 `$skill-name` 语法提及的 Skill 内容封装并注入到对话中
-3. **消息标准化**：统一不同来源的指令格式，确保它们能被正确识别和处理
+1. **项目文档注入**：将项目中的 `AGENTS.md` 文件内容封装为结构化消息，注入到对话上下文中
+2. **Skill 指令注入**：将 Skill（技能）的 `SKILL.md` 内容封装后注入模型上下文
+3. **指令序列化**：提供统一的文本格式，便于模型识别和处理特殊指令
 
-该模块位于 Codex 核心逻辑层，作为**上下文构建**的一部分，在每次用户交互时被调用，将外部指令整合到 AI 模型的输入中。
+### 职责边界
+
+| 职责 | 说明 |
+|------|------|
+| 封装 | 将原始指令文本包装为带标记的格式 |
+| 序列化 | 将结构化数据转换为 `ResponseItem` |
+| 标记识别 | 与 `contextual_user_message.rs` 配合，提供标记前缀常量 |
 
 ---
 
 ## 功能点目的
 
-### 1. UserInstructions - 用户项目指令
+### 1. UserInstructions - AGENTS.md 指令封装
 
-**目的**：将项目级文档（`AGENTS.md`）转换为标准化的 AI 消息格式。
+**目的**：将项目目录中的 `AGENTS.md` 指令封装为模型可识别的格式。
 
-**工作流程**：
-- 从 `project_doc.rs` 获取合并后的项目文档内容
-- 将文档内容与当前工作目录关联
-- 封装为带有特定标记格式的消息，便于后续识别和处理
-
-**输出格式示例**：
-```
-# AGENTS.md instructions for /path/to/project
+**序列化格式**：
+```text
+# AGENTS.md instructions for {directory}
 
 <INSTRUCTIONS>
-[项目文档内容]
+{text}
 </INSTRUCTIONS>
 ```
 
-### 2. SkillInstructions - Skill 指令
+**使用场景**：
+- 会话启动时，从项目根目录到当前工作目录的所有 `AGENTS.md` 文件被收集
+- 通过 `project_doc.rs` 的 `get_user_instructions()` 函数获取
+- 最终通过 `UserInstructions::serialize_to_text()` 序列化并注入对话
 
-**目的**：将用户显式提及的 Skill（通过 `$skill-name` 语法）内容注入对话。
+### 2. SkillInstructions - Skill 指令封装
 
-**工作流程**：
-- 在 `skills/injection.rs` 中解析用户输入中的 Skill 提及
-- 读取对应 Skill 文件（`SKILL.md`）的内容
-- 封装为标准化消息格式
+**目的**：将 Skill（技能）的 `SKILL.md` 内容封装为模型可识别的格式。
 
-**输出格式示例**：
+**序列化格式**：
 ```xml
 <skill>
-<name>demo-skill</name>
-<path>skills/demo/SKILL.md</path>
-[Skill 内容]
+<name>{name}</name>
+<path>{path}</path>
+{contents}
 </skill>
 ```
 
-### 3. 上下文片段定义（ContextualUserFragmentDefinition）
-
-**目的**：提供统一的机制来定义、识别和处理各类上下文片段。
-
-**支持的片段类型**：
-- `AGENTS_MD_FRAGMENT` - 项目文档指令
-- `SKILL_FRAGMENT` - Skill 指令
-- `ENVIRONMENT_CONTEXT_FRAGMENT` - 环境上下文
-- `USER_SHELL_COMMAND_FRAGMENT` - 用户 shell 命令
-- `TURN_ABORTED_FRAGMENT` - 会话中止标记
-- `SUBAGENT_NOTIFICATION_FRAGMENT` - 子代理通知
+**使用场景**：
+- 用户在输入中显式提及 Skill（如 `$skill-name`）
+- 通过 `skills/injection.rs` 的 `build_skill_injections()` 函数加载并封装
+- 注入到对话上下文中，让模型了解可用技能
 
 ---
 
@@ -83,8 +73,8 @@
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename = "user_instructions", rename_all = "snake_case")]
 pub(crate) struct UserInstructions {
-    pub directory: String,  // 指令关联的目录路径
-    pub text: String,       // 指令内容
+    pub directory: String,  // AGENTS.md 所在目录
+    pub text: String,       // 文件内容
 }
 ```
 
@@ -93,101 +83,67 @@ pub(crate) struct UserInstructions {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename = "skill_instructions", rename_all = "snake_case")]
 pub(crate) struct SkillInstructions {
-    pub name: String,     // Skill 名称
-    pub path: String,     // Skill 文件路径
-    pub contents: String, // Skill 内容
-}
-```
-
-#### ContextualUserFragmentDefinition
-```rust
-#[derive(Clone, Copy)]
-pub(crate) struct ContextualUserFragmentDefinition {
-    start_marker: &'static str,  // 起始标记
-    end_marker: &'static str,    // 结束标记
+    pub name: String,       // Skill 名称
+    pub path: String,       // Skill 文件路径
+    pub contents: String,   // SKILL.md 内容
 }
 ```
 
 ### 关键流程
 
-#### 1. 用户指令注入流程
+#### 1. AGENTS.md 注入流程
 
 ```
-用户输入
-    ↓
-codex.rs::prepare_turn_context()
-    ↓
-get_user_instructions(&config)  [project_doc.rs]
-    ↓
-读取 AGENTS.md + 配置指令 + JS REPL 指令 + 分层指令
-    ↓
-合并为单一字符串
-    ↓
-UserInstructions::serialize_to_text()
-    ↓
-格式化为标记文本 → 添加到 contextual_user_sections
-    ↓
-build_contextual_user_message() → ResponseItem
+Codex::spawn()
+  └─> get_user_instructions(&config).await
+        ├─> read_project_docs(config)     // 发现 AGENTS.md 文件
+        │     └─> discover_project_doc_paths()
+        │           └─> 从 cwd 向上遍历到项目根目录
+        └─> 合并配置中的 instructions 和项目文档
+  └─> user_instructions 存入 SessionConfiguration
+        └─> 后续转为 UserInstructions 并序列化注入
 ```
 
-#### 2. Skill 指令注入流程
+#### 2. Skill 注入流程
 
 ```
-用户输入（包含 $skill-name）
-    ↓
-codex.rs::prepare_turn_context()
-    ↓
-build_skill_injections()  [skills/injection.rs]
-    ↓
-collect_explicit_skill_mentions() 解析提及
-    ↓
-遍历匹配 Skill → 读取 SKILL.md 文件
-    ↓
-SkillInstructions::from(skill) → ResponseItem
-    ↓
-添加到 items 列表
+用户输入包含 $skill-name
+  └─> collect_explicit_skill_mentions()   // skills/injection.rs
+        └─> 解析提及的 Skill
+  └─> build_skill_injections()
+        ├─> 读取 SKILL.md 文件
+        └─> 创建 SkillInstructions
+              └─> ResponseItem::from(SkillInstructions)
+                    └─> SKILL_FRAGMENT.into_message(wrapped_text)
 ```
 
-### 序列化实现
+### 协议与标记
 
-#### UserInstructions 序列化
-```rust
-pub(crate) fn serialize_to_text(&self) -> String {
-    format!(
-        "{prefix}{directory}\n\n<INSTRUCTIONS>\n{contents}\n{suffix}",
-        prefix = AGENTS_MD_FRAGMENT.start_marker(),  // "# AGENTS.md instructions for "
-        directory = self.directory,
-        contents = self.text,
-        suffix = AGENTS_MD_FRAGMENT.end_marker(),    // "</INSTRUCTIONS>"
-    )
-}
-```
+#### 标记常量（定义在 contextual_user_message.rs）
 
-#### SkillInstructions 序列化
-```rust
-impl From<SkillInstructions> for ResponseItem {
-    fn from(si: SkillInstructions) -> Self {
-        SKILL_FRAGMENT.into_message(SKILL_FRAGMENT.wrap(format!(
-            "<name>{}</name>\n<path>{}</path>\n{}",
-            si.name, si.path, si.contents
-        )))
-    }
-}
-```
+| 常量 | 值 | 用途 |
+|------|-----|------|
+| `AGENTS_MD_START_MARKER` | `# AGENTS.md instructions for ` | UserInstructions 开始标记 |
+| `AGENTS_MD_END_MARKER` | `</INSTRUCTIONS>` | UserInstructions 结束标记 |
+| `SKILL_OPEN_TAG` | `<skill>` | SkillInstructions 开始标记 |
+| `SKILL_CLOSE_TAG` | `</skill>` | SkillInstructions 结束标记 |
 
-### 片段匹配逻辑
+#### ContextualUserFragmentDefinition
+
+提供统一的片段处理能力：
+- `matches_text()`：检测文本是否匹配标记
+- `wrap()`：包装内容
+- `into_message()`：转换为 `ResponseItem::Message`
+
+### 内存排除策略
+
+在 `contextual_user_message.rs` 中定义：
 
 ```rust
-pub(crate) fn matches_text(&self, text: &str) -> bool {
-    let trimmed = text.trim_start();
-    let starts_with_marker = trimmed
-        .get(..self.start_marker.len())
-        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(self.start_marker));
-    let trimmed = trimmed.trim_end();
-    let ends_with_marker = trimmed
-        .get(trimmed.len().saturating_sub(self.end_marker.len())..)
-        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(self.end_marker));
-    starts_with_marker && ends_with_marker
+pub(crate) fn is_memory_excluded_contextual_user_fragment(content_item: &ContentItem) -> bool {
+    // AGENTS.md 和 Skill 指令被排除在内存阶段1输入之外
+    // 因为它们是提示脚手架而非对话内容
+    AGENTS_MD_FRAGMENT.matches_text(text) || SKILL_FRAGMENT.matches_text(text)
 }
 ```
 
@@ -195,161 +151,129 @@ pub(crate) fn matches_text(&self, text: &str) -> bool {
 
 ## 关键代码路径与文件引用
 
-### 本模块文件
+### 本目录文件
 
 | 文件 | 职责 |
 |------|------|
-| `mod.rs` | 模块导出，暴露 `UserInstructions`、`SkillInstructions` 和 `USER_INSTRUCTIONS_PREFIX` |
-| `user_instructions.rs` | 核心实现：数据结构定义、序列化逻辑、From 转换实现 |
-| `user_instructions_tests.rs` | 单元测试：验证序列化格式和匹配逻辑 |
+| `mod.rs` | 模块导出，暴露 `UserInstructions`, `SkillInstructions`, `USER_INSTRUCTIONS_PREFIX` |
+| `user_instructions.rs` | 核心数据结构定义和 `From` 转换实现 |
+| `user_instructions_tests.rs` | 单元测试 |
 
 ### 调用方（上游）
 
 | 文件 | 调用点 | 用途 |
 |------|--------|------|
-| `codex.rs:216` | `use crate::instructions::UserInstructions` | 导入用户指令类型 |
-| `codex.rs:3510-3518` | `UserInstructions::serialize_to_text()` | 将项目文档封装为上下文消息 |
-| `skills/injection.rs:9` | `use crate::instructions::SkillInstructions` | 导入 Skill 指令类型 |
-| `skills/injection.rs:50` | `ResponseItem::from(SkillInstructions {...})` | 将 Skill 内容转换为消息项 |
+| `codex.rs:216` | `use crate::instructions::UserInstructions;` | 导入模块 |
+| `codex.rs:486` | `let user_instructions = get_user_instructions(&config).await;` | 获取用户指令 |
+| `skills/injection.rs:9` | `use crate::instructions::SkillInstructions;` | 导入 Skill 指令 |
+| `skills/injection.rs:50-54` | `ResponseItem::from(SkillInstructions { ... })` | 创建 Skill 指令项 |
 
 ### 被调用方（下游）
 
-| 文件 | 依赖内容 | 用途 |
-|------|----------|------|
-| `contextual_user_message.rs:66` | `AGENTS_MD_FRAGMENT` | 定义 AGENTS.md 片段标记 |
-| `contextual_user_message.rs:73` | `SKILL_FRAGMENT` | 定义 Skill 片段标记 |
-| `contextual_user_message.rs:17-64` | `ContextualUserFragmentDefinition` | 片段定义基础结构 |
-| `protocol/src/models.rs:295` | `ResponseItem` | 消息项枚举定义 |
-| `protocol/src/models.rs` | `ContentItem` | 内容项枚举定义 |
-
-### 配置与项目文档
-
-| 文件 | 职责 |
+| 文件 | 关系 |
 |------|------|
-| `project_doc.rs:79` | `get_user_instructions()` - 获取合并后的用户指令 |
-| `config/mod.rs` | `Config::user_instructions` - 配置中的用户指令 |
-| `config/mod.rs` | `Config::project_doc_max_bytes` - 项目文档大小限制 |
+| `contextual_user_message.rs` | 提供 `AGENTS_MD_FRAGMENT` 和 `SKILL_FRAGMENT` 用于序列化 |
+| `project_doc.rs` | 实现 `get_user_instructions()`，提供原始指令文本 |
+
+### 依赖模块
+
+```
+instructions/
+  ├─> contextual_user_message.rs  (AGENTS_MD_FRAGMENT, SKILL_FRAGMENT)
+  ├─> project_doc.rs              (get_user_instructions)
+  └─> codex_protocol::models::ResponseItem (目标类型)
+```
 
 ---
 
 ## 依赖与外部交互
 
-### 内部依赖
-
-```
-instructions/
-├── contextual_user_message  (AGENTS_MD_FRAGMENT, SKILL_FRAGMENT)
-├── project_doc              (get_user_instructions)
-├── skills/injection         (Skill 提及解析和注入)
-└── codex.rs                 (TurnContext 构建)
-```
-
 ### 外部 Crate 依赖
 
 | Crate | 用途 |
 |-------|------|
-| `serde` | 序列化/反序列化 `UserInstructions` 和 `SkillInstructions` |
-| `codex_protocol::models::ResponseItem` | 消息项类型 |
-| `codex_protocol::models::ContentItem` | 内容项类型 |
+| `serde` | 序列化/反序列化支持 |
+| `codex_protocol::models::ResponseItem` | 目标消息类型 |
 
-### 协议集成
+### 内部模块依赖
 
-`ResponseItem` 是 Codex 协议的核心消息类型，定义于 `codex-rs/protocol/src/models.rs`：
+| 模块 | 用途 |
+|------|------|
+| `contextual_user_message` | 获取片段定义和标记常量 |
+| `project_doc` | 获取项目级文档内容 |
+| `skills/injection` | 调用 SkillInstructions 创建 |
 
-```rust
-pub enum ResponseItem {
-    Message { role, content, ... },
-    Reasoning { ... },
-    LocalShellCall { ... },
-    FunctionCall { ... },
-    ...
-}
-```
+### 配置影响
 
-`instructions` 模块通过 `From<T> for ResponseItem` 实现将指令无缝转换为 `Message` 类型的 `ResponseItem`。
+| 配置项 | 影响 |
+|--------|------|
+| `config.user_instructions` | 用户自定义指令，与 AGENTS.md 合并 |
+| `config.project_doc_max_bytes` | 项目文档大小限制 |
+| `config.project_doc_fallback_filenames` | 备选文档文件名 |
+| `Feature::ChildAgentsMd` | 启用分层 AGENTS.md 支持 |
 
 ---
 
 ## 风险、边界与改进建议
 
-### 潜在风险
+### 风险点
 
-1. **序列化格式硬编码**
-   - 标记字符串（如 `# AGENTS.md instructions for `）在多处硬编码
-   - 修改格式需要同步更新 `contextual_user_message.rs` 和本模块
-   - **建议**：将标记定义集中管理，通过常量或配置驱动
+1. **标记冲突风险**
+   - 如果用户消息恰好以 `# AGENTS.md instructions for ` 开头，可能被误判为指令
+   - 当前通过 `matches_text()` 的精确匹配降低风险
 
-2. **文本匹配大小写敏感问题**
-   - `matches_text()` 使用 `eq_ignore_ascii_case` 进行大小写不敏感匹配
-   - 但序列化时使用的是原始标记字符串
-   - **风险**：如果标记被修改，匹配逻辑可能失效
+2. **序列化格式稳定性**
+   - XML 格式的 `<skill>` 标记是硬编码的，变更会影响下游解析
+   - 需要保持与模型训练数据的一致性
 
-3. **内存排除逻辑耦合**
-   - `is_memory_excluded_contextual_user_fragment()` 在 `contextual_user_message.rs` 中硬编码排除 `AGENTS_MD_FRAGMENT` 和 `SKILL_FRAGMENT`
-   - 新增片段类型时需要同步更新该函数
-   - **建议**：在 `ContextualUserFragmentDefinition` 中添加 `exclude_from_memory` 标志
+3. **内存排除副作用**
+   - AGENTS.md 和 Skill 指令被排除在内存生成之外
+   - 这可能导致长对话中模型"忘记"项目指令
 
-### 边界情况
+### 边界条件
 
-1. **空内容处理**
-   - `UserInstructions.text` 为空时仍会生成带标记的包装文本
-   - 测试用例显示这是预期行为
-
-2. **路径编码**
-   - `SkillInstructions.path` 使用 `to_string_lossy()` 转换，可能丢失非 UTF-8 路径信息
-
-3. **Skill 文件读取失败**
-   - 在 `skills/injection.rs` 中，Skill 文件读取失败会记录警告但不会阻止流程
-   - 失败信息通过 `SkillInjections.warnings` 返回
+| 场景 | 行为 |
+|------|------|
+| AGENTS.md 不存在 | `get_user_instructions()` 返回 `None`，不注入 |
+| AGENTS.md 为空 | 被过滤掉，不注入空内容 |
+| Skill 文件读取失败 | 记录警告，不中断流程 |
+| 项目文档超过大小限制 | 截断处理，记录警告 |
 
 ### 改进建议
 
-1. **API 一致性**
-   - `UserInstructions` 和 `SkillInstructions` 的序列化方式不一致：
-     - `UserInstructions` 使用 `serialize_to_text()` 方法
-     - `SkillInstructions` 仅通过 `From` trait 转换
-   - **建议**：统一为两者都提供显式的序列化方法
+1. **标记版本控制**
+   - 考虑在标记中加入版本信息（如 `<INSTRUCTIONS v2>`）
+   - 便于未来格式演进时向后兼容
 
-2. **类型安全**
-   - `directory` 和 `path` 字段使用 `String` 而非 `PathBuf`
-   - **建议**：使用路径类型增强类型安全
+2. **动态指令刷新**
+   - 当前 AGENTS.md 只在会话启动时加载
+   - 可考虑文件监视器检测变更并支持热刷新
 
-3. **测试覆盖**
-   - 当前测试仅验证序列化格式和匹配逻辑
-   - **建议**：增加边界测试（空内容、特殊字符、长文本等）
+3. **指令优先级**
+   - 当前多个 AGENTS.md 按目录层级简单合并
+   - 可考虑添加优先级标记或覆盖机制
 
-4. **文档完善**
-   - 模块缺少顶层文档注释
-   - **建议**：添加模块级文档说明整体设计和使用方式
-
-### 性能考量
-
-1. **字符串拼接**
-   - 使用 `format!` 进行字符串拼接，对于大文档可能产生多次内存分配
-   - **建议**：对于超大文档考虑使用 `String::with_capacity` 预分配
-
-2. **重复序列化**
-   - 每次 turn 都会重新序列化项目文档
-   - **建议**：考虑缓存机制（需注意配置变更失效）
+4. **测试覆盖**
+   - 当前测试仅覆盖基本序列化
+   - 建议增加边界条件测试（超大文件、特殊字符等）
 
 ---
 
-## 附录：常量定义
+## 测试说明
 
-```rust
-// AGENTS.md 片段标记
-pub(crate) const AGENTS_MD_START_MARKER: &str = "# AGENTS.md instructions for ";
-pub(crate) const AGENTS_MD_END_MARKER: &str = "</INSTRUCTIONS>";
+测试文件：`user_instructions_tests.rs`
 
-// Skill 片段标记
-pub(crate) const SKILL_OPEN_TAG: &str = "<skill>";
-pub(crate) const SKILL_CLOSE_TAG: &str = "</skill>";
-
-// 导出常量
-pub const USER_INSTRUCTIONS_PREFIX: &str = "# AGENTS.md instructions for ";
-```
+| 测试函数 | 覆盖内容 |
+|----------|----------|
+| `test_user_instructions()` | UserInstructions 序列化格式验证 |
+| `test_is_user_instructions()` | AGENTS_MD_FRAGMENT 匹配逻辑验证 |
+| `test_skill_instructions()` | SkillInstructions 序列化格式验证 |
+| `test_is_skill_instructions()` | SKILL_FRAGMENT 匹配逻辑验证 |
 
 ---
 
-*研究完成时间：2026-03-21*
-*研究者：Kimi Code CLI*
+## 总结
+
+`instructions` 模块是 Codex 中**指令管道**的关键组件，负责将外部配置（AGENTS.md、Skills）转换为模型可消费的标准格式。其设计简洁，通过 `ContextualUserFragmentDefinition` 实现了统一的标记处理，同时与 `project_doc` 和 `skills/injection` 紧密协作，构成了完整的指令注入体系。
+
+理解此模块有助于把握 Codex 如何将项目上下文和技能知识注入到 LLM 对话中，是定制和扩展 Codex 行为的重要切入点。
