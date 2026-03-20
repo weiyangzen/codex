@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/home/sansha/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+CODEX_VENDOR_PATH="/home/sansha/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/path"
+export PATH="${CODEX_VENDOR_PATH}:/home/sansha/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
+if ! command -v rg >/dev/null 2>&1; then
+  rg() {
+    grep -E "$@"
+  }
+fi
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT="$(basename "$REPO")"
@@ -20,7 +27,8 @@ TMUX_WRAP_ENABLED="${TMUX_WRAP_ENABLED:-1}"
 TMUX_SESSION_NAME="${TMUX_SESSION_NAME:-$PROJECT}"
 WORKER_MODE="${RESEARCH_GUARD_WORKER:-0}"
 KIMI_MODEL="${KIMI_MODEL:-k2p5}"
-KIMI_KEYS_FILE="$HOME/kimi_keys.txt"
+KIMI_BASE_URL="${KIMI_BASE_URL:-https://api.kimi.com/coding/v1}"
+KIMI_KEYS_FILE="${KIMI_KEYS_FILE:-$HOME/kimi_keys.txt}"
 KIMI_KEY_INDEX_FILE="$LOG_DIR/research_guard.kimi_key_index"
 
 mkdir -p "$LOG_DIR" "$REPO/Docs/researches"
@@ -68,9 +76,38 @@ write_kimi_key_index() {
   printf '%s\n' "$idx" > "$KIMI_KEY_INDEX_FILE"
 }
 
+toml_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+write_kimi_config_file() {
+  local cfg_file="$1"
+  local model_esc base_url_esc
+  model_esc="$(toml_escape "$KIMI_MODEL")"
+  base_url_esc="$(toml_escape "$KIMI_BASE_URL")"
+  cat > "$cfg_file" <<EOF
+default_model = "${model_esc}"
+default_thinking = false
+default_yolo = true
+
+[providers.kimi_for_coding]
+type = "kimi"
+base_url = "${base_url_esc}"
+api_key = "placeholder"
+
+[models."${model_esc}"]
+provider = "kimi_for_coding"
+model = "${model_esc}"
+max_context_size = 262144
+EOF
+}
+
 run_research_with_kimi() {
   local task="$1"
-  local rc idx key_count attempt slot key
+  local rc idx key_count attempt slot key cfg_file attempt_log
 
   if ! read_kimi_keys; then
     log "error: kimi key file missing/empty: $KIMI_KEYS_FILE"
@@ -90,30 +127,43 @@ run_research_with_kimi() {
     key="${KIMI_KEYS[$slot]}"
     log "info: kimi exec attempt=${attempt}/${key_count} key_index=${slot} model=${KIMI_MODEL}"
 
+    cfg_file="$(mktemp "$LOG_DIR/kimi_config.${PROJECT}.XXXXXX.toml")"
+    attempt_log="$(mktemp "$LOG_DIR/kimi_attempt.${PROJECT}.XXXXXX.log")"
+    write_kimi_config_file "$cfg_file"
+
     rc=0
     if [[ "$KIMI_EXEC_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && (( KIMI_EXEC_TIMEOUT_SECONDS > 0 )); then
-      timeout "$KIMI_EXEC_TIMEOUT_SECONDS" env \
-        KIMI_API_KEY="$key" \
-        MOONSHOT_API_KEY="$key" \
-        OPENAI_API_KEY="$key" \
-        "$KIMI_BIN" \
-        --print \
-        --yolo \
-        --model "$KIMI_MODEL" \
-        --work-dir "$REPO" \
-        --prompt "$task" >> "$LOG_FILE" 2>&1 || rc=$?
+      (
+        export KIMI_API_KEY="$key"
+        timeout "$KIMI_EXEC_TIMEOUT_SECONDS" \
+          "$KIMI_BIN" \
+          --print \
+          --yolo \
+          --config-file "$cfg_file" \
+          --model "$KIMI_MODEL" \
+          --work-dir "$REPO" \
+          --prompt "$task" > "$attempt_log" 2>&1
+      ) || rc=$?
     else
-      env \
-        KIMI_API_KEY="$key" \
-        MOONSHOT_API_KEY="$key" \
-        OPENAI_API_KEY="$key" \
+      (
+        export KIMI_API_KEY="$key"
         "$KIMI_BIN" \
-        --print \
-        --yolo \
-        --model "$KIMI_MODEL" \
-        --work-dir "$REPO" \
-        --prompt "$task" >> "$LOG_FILE" 2>&1 || rc=$?
+          --print \
+          --yolo \
+          --config-file "$cfg_file" \
+          --model "$KIMI_MODEL" \
+          --work-dir "$REPO" \
+          --prompt "$task" > "$attempt_log" 2>&1
+      ) || rc=$?
     fi
+
+    if [[ "$rc" -eq 0 ]] && grep -Eqi 'LLM not set|AUTH_REQUIRED|auth required|invalid api key|quota|insufficient quota|rate limit|401|403' "$attempt_log"; then
+      rc=65
+      log "warn: kimi output indicates auth/model error despite zero exit; rotating key"
+    fi
+
+    cat "$attempt_log" >> "$LOG_FILE"
+    rm -f "$attempt_log" "$cfg_file"
 
     if [[ "$rc" -eq 0 ]]; then
       write_kimi_key_index "$slot"

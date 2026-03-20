@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if ! command -v rg >/dev/null 2>&1; then
+  rg() {
+    grep -E "$@"
+  }
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="$REPO_ROOT/.cron"
 STATE_FILE="$LOG_DIR/research_cleanup.state"

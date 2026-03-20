@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+CODEX_VENDOR_PATH="/home/sansha/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/path"
+export PATH="${CODEX_VENDOR_PATH}:/home/sansha/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
+if ! command -v rg >/dev/null 2>&1; then
+  rg() {
+    grep -E "$@"
+  }
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CHECKLIST_FILE="$REPO_ROOT/Docs/researches/blueprint_checklist.md"
 
