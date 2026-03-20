@@ -1,284 +1,346 @@
-# Research: codex-rs/core/tests/suite/snapshots
+# DIR: codex-rs/core/tests/suite/snapshots 研究文档
 
 ## 场景与职责
 
-`snapshots` 目录是 Codex Rust 核心测试套件的**快照测试数据存储目录**，使用 [`insta`](https://insta.rs/) 快照测试框架管理。该目录存储了 28 个 `.snap` 文件，这些文件记录了模型可见布局（model-visible layout）和上下文压缩（context compaction）相关测试的预期输出。
+`snapshots` 目录是 Codex Rust 核心模块的 **insta snapshot 测试快照存储目录**，用于存储集成测试生成的结构化快照数据。这些快照记录了 Codex 与模型交互时的请求/响应格式、上下文布局、历史记录压缩(compaction)等关键行为的预期输出。
 
-**核心职责：**
-1. **回归测试保护**：捕获并持久化 Codex 核心向模型发送的请求结构，确保代码变更不会意外改变模型可见的上下文布局
-2. **文档化行为**：作为可读的规格说明，展示不同场景下 Codex 如何组织发送给模型的消息序列
-3. **跨平台一致性**：通过规范化处理（如路径、临时目录），确保测试在不同环境下结果一致
+### 核心职责
+
+1. **回归测试防护**: 通过对比快照捕获 Codex 核心行为的变化，防止意外的行为回归
+2. **文档化预期行为**: 快照文件本身就是对 Codex 内部数据流的活文档
+3. **可视化模型可见上下文**: 展示 Codex 发送给模型的输入序列（input sequence）的结构
+4. **验证 compaction 逻辑**: 捕获上下文压缩前后的历史记录变化
 
 ---
 
 ## 功能点目的
 
-### 1. 上下文压缩（Context Compaction）快照
+### 1. Snapshot 测试类型
 
-**测试场景覆盖：**
-- **手动压缩** (`manual_compact_*`)：用户主动触发 `/compact` 命令时的请求结构
-- **自动压缩** (`pre_turn_compaction_*`)：当 token 使用量超过阈值时自动触发的压缩
-- **采样前压缩** (`pre_sampling_model_switch_*`)：切换到更小上下文窗口模型时的预处理压缩
-- **回合中压缩** (`mid_turn_compaction_*`)：多轮对话过程中的中间压缩
-- **恢复与分支** (`compact_resume_*`, `rollback_past_*`)：会话恢复和 fork 后的压缩状态保持
+该目录包含 28 个 `.snap` 文件，覆盖以下测试场景：
 
-**关键验证点：**
-- 压缩请求是否包含正确的 summarization prompt
-- 压缩后的历史记录是否以 summary 消息形式重新注入
-- 开发者指令（developer instructions）是否在压缩后保持
-- 模型切换标记（model-switch）的处理是否正确
+| 测试类别 | 文件数量 | 目的 |
+|---------|---------|------|
+| `compact` (本地压缩) | 7 | 验证手动/自动上下文压缩的行为 |
+| `compact_remote` (远程压缩) | 14 | 验证通过 `/v1/responses/compact` API 的远程压缩 |
+| `compact_resume_fork` | 1 | 验证压缩后的恢复(resume)和分支(fork)行为 |
+| `model_visible_layout` | 6 | 验证模型可见的上下文布局变化 |
 
-### 2. 远程压缩（Remote Compaction）快照
+### 2. 关键测试场景详解
 
-**测试场景覆盖：**
-- 远程 `/v1/responses/compact` API 调用的请求结构
-- 实时对话（realtime conversation）场景下的压缩行为
-- 远程压缩失败时的错误处理
+#### 2.1 本地 Compaction 测试 (`compact/*.snap`)
 
-**关键验证点：**
-- 远程压缩请求是否包含正确的认证头（session_id, authorization）
-- 压缩输出是否正确地以 compaction item 形式返回
-- 实时对话开始/结束标记的重新注入行为
+- **`manual_compact_with_history_shapes.snap`**: 手动压缩时，历史记录被压缩为摘要，后续请求包含摘要+新用户消息
+- **`manual_compact_without_prev_user_shapes.snap`**: 无先前用户轮次时的压缩行为
+- **`pre_turn_compaction_context_window_exceeded_shapes.snap`**: 上下文窗口超限时的预轮次压缩
+- **`pre_sampling_model_switch_compaction_shapes.snap`**: 模型切换时的采样前压缩
 
-### 3. 模型可见布局（Model Visible Layout）快照
+#### 2.2 远程 Compaction 测试 (`compact_remote/*.snap`)
 
-**测试场景覆盖：**
-- **回合覆盖** (`turn_overrides`)：单轮对话中 cwd、approval_policy、personality 的变更
-- **会话恢复** (`resume_*`)：从 rollout 文件恢复会话后的首回合请求结构
-- **环境上下文** (`environment_context_*`)：包含子代理（subagents）信息的环境上下文格式
+- **`remote_manual_compact_with_history_shapes.snap`**: 远程压缩后，历史被替换为 `compaction` 类型项
+- **`remote_pre_turn_compaction_failure_shapes.snap`**: 远程压缩失败时的错误处理
+- **`remote_pre_turn_compaction_restates_realtime_start/end_shapes.snap`**: Realtime 会话的压缩状态恢复
 
-**关键验证点：**
-- 系统指令（system instructions）的正确排序和分组
-- 用户消息与开发者消息的相对位置
-- 环境上下文（environment_context）XML 结构的正确性
-- AGENTS.md 指令的注入时机和格式
+#### 2.3 模型可见布局测试 (`model_visible_layout/*.snap`)
+
+- **`model_visible_layout_turn_overrides_shapes.snap`**: 轮次级覆盖（cwd、approval_policy、personality）对布局的影响
+- **`model_visible_layout_environment_context_includes_*_subagents.snap`**: 子代理数量在环境上下文中的体现
 
 ---
 
 ## 具体技术实现
 
-### 快照生成流程
+### 1. Snapshot 生成机制
+
+#### 1.1 核心依赖: `insta` crate
 
 ```rust
-// 典型测试模式（来自 compact.rs）
+// 来自 compact.rs 的示例
 insta::assert_snapshot!(
-    "manual_compact_with_history_shapes",
+    "pre_sampling_model_switch_compaction_shapes",
     format_labeled_requests_snapshot(
-        "Manual /compact with prior user history compacts existing history...",
+        "Pre-sampling compaction on model switch to a smaller context window...",
         &[
-            ("Local Compaction Request", &requests[1]),
-            ("Local Post-Compaction History Layout", &requests[2]),
+            ("Initial Request (Previous Model)", &requests[0]),
+            ("Pre-sampling Compaction Request", &requests[1]),
+            ("Post-Compaction Follow-up Request (Next Model)", &requests[2]),
         ]
     )
 );
 ```
 
-**关键组件：**
+#### 1.2 Context Snapshot 工具模块
 
-1. **`format_labeled_requests_snapshot`** (`context_snapshot.rs:209-225`)
-   - 将多个 HTTP 请求格式化为带标签的快照文本
-   - 支持多种渲染模式（RedactedText, FullText, KindOnly, KindWithTextPrefix）
-
-2. **`format_request_input_snapshot`** (`context_snapshot.rs:55-61`)
-   - 提取请求中的 `input` 数组（OpenAI Responses API 格式）
-   - 将 JSON 结构转换为人类可读的文本表示
-
-3. **`format_response_items_snapshot`** (`context_snapshot.rs:63-207`)
-   - 核心格式化逻辑，处理多种 item 类型：
-     - `message`: 按 role（user/developer/assistant）分类，处理多 part 内容
-     - `function_call` / `function_call_output`: 工具调用及其输出
-     - `local_shell_call`: 本地 shell 命令执行
-     - `reasoning`: 推理内容（含 encrypted_content 标记）
-     - `compaction`: 压缩摘要项
-
-### 文本规范化处理
-
-**`canonicalize_snapshot_text`** (`context_snapshot.rs:271-326`) 实现敏感内容的脱敏和标准化：
-
-| 原始内容模式 | 规范化后 |
-|-------------|---------|
-| `<permissions instructions>...` | `<PERMISSIONS_INSTRUCTIONS>` |
-| `<apps_instructions>...` | `<APPS_INSTRUCTIONS>` |
-| `<skills_instructions>...` | `<SKILLS_INSTRUCTIONS>` |
-| `<plugins_instructions>...` | `<PLUGINS_INSTRUCTIONS>` |
-| `# AGENTS.md instructions for ...` | `<AGENTS_MD>` |
-| `<environment_context>...<cwd>X...</cwd>...</environment_context>` | `<ENVIRONMENT_CONTEXT:cwd=<CWD>>` |
-| `You are performing a CONTEXT CHECKPOINT COMPACTION...` | `<SUMMARIZATION_PROMPT>` |
-| `Another language model started to solve this problem\n{summary}` | `<COMPACTION_SUMMARY>\n{summary}` |
-| `/.../skills/.system/{name}/SKILL.md` | `<SYSTEM_SKILLS_ROOT>/{name}/SKILL.md` |
-
-### 渲染模式配置
-
-**`ContextSnapshotOptions`** 结构体控制快照输出格式：
+位于 `codex-rs/core/tests/common/context_snapshot.rs`:
 
 ```rust
+pub enum ContextSnapshotRenderMode {
+    #[default]
+    RedactedText,      // 脱敏文本（默认）
+    FullText,          // 完整文本
+    KindOnly,          // 仅类型
+    KindWithTextPrefix { max_chars: usize }, // 类型+文本前缀
+}
+
 pub struct ContextSnapshotOptions {
-    render_mode: ContextSnapshotRenderMode,  // 文本渲染模式
-    strip_capability_instructions: bool,      // 是否移除 capability 指令
-    strip_agents_md_user_context: bool,       // 是否移除 AGENTS.md 上下文
+    render_mode: ContextSnapshotRenderMode,
+    strip_capability_instructions: bool,  // 是否移除能力指令
+    strip_agents_md_user_context: bool,   // 是否移除 AGENTS.md 上下文
 }
 ```
 
-**渲染模式：**
-- `RedactedText`（默认）：使用占位符替换敏感/长文本
-- `FullText`：保留完整文本（用于调试）
-- `KindOnly`：仅显示 item 类型和 role
-- `KindWithTextPrefix { max_chars }`：显示类型和前 N 个字符（测试中最常用）
+#### 1.3 快照文本规范化
+
+```rust
+fn canonicalize_snapshot_text(text: &str) -> String {
+    // 将动态内容替换为占位符，确保快照稳定性
+    if text.starts_with("<permissions instructions>") {
+        return "<PERMISSIONS_INSTRUCTIONS>".to_string();
+    }
+    if text.starts_with("<environment_context>") {
+        // 提取 subagent 数量，标准化路径
+        return "<ENVIRONMENT_CONTEXT:cwd=<CWD>:subagents=N>".to_string();
+    }
+    if text.starts_with("You are performing a CONTEXT CHECKPOINT COMPACTION.") {
+        return "<SUMMARIZATION_PROMPT>".to_string();
+    }
+    // ... 其他规范化规则
+}
+```
+
+### 2. 测试基础设施
+
+#### 2.1 ResponseMock 请求捕获
+
+```rust
+// tests/common/responses.rs
+#[derive(Debug, Clone)]
+pub struct ResponseMock {
+    requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+}
+
+impl ResponseMock {
+    pub fn single_request(&self) -> ResponsesRequest { ... }
+    pub fn requests(&self) -> Vec<ResponsesRequest> { ... }
+    pub fn body_contains_text(&self, text: &str) -> bool { ... }
+}
+```
+
+#### 2.2 SSE 事件构造器
+
+```rust
+// 用于构造模拟的 SSE 响应流
+pub fn sse(events: Vec<Value>) -> String { ... }
+pub fn ev_assistant_message(id: &str, content: &str) -> Value { ... }
+pub fn ev_completed(response_id: &str) -> Value { ... }
+pub fn ev_completed_with_tokens(response_id: &str, tokens: i64) -> Value { ... }
+```
+
+### 3. Snapshot 文件格式
+
+每个 `.snap` 文件是 YAML 格式的结构化数据：
+
+```yaml
+---
+source: core/tests/suite/compact.rs                    # 源测试文件
+expression: "format_labeled_requests_snapshot(...)"     # 生成表达式
+---
+Scenario: 测试场景描述
+
+## 请求/响应段标题
+00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+02:message/user:hello world
+03:message/assistant:FIRST_REPLY
+04:message/user:<SUMMARIZATION_PROMPT>
+```
+
+### 4. 关键数据结构
+
+#### 4.1 请求输入项类型映射
+
+| 快照前缀 | OpenAI API 类型 | 说明 |
+|---------|----------------|------|
+| `message/developer` | `message` (role=developer) | 系统/开发者指令 |
+| `message/user` | `message` (role=user) | 用户输入 |
+| `message/assistant` | `message` (role=assistant) | 助手回复 |
+| `function_call` | `function_call` | 工具调用 |
+| `function_call_output` | `function_call_output` | 工具输出 |
+| `local_shell_call` | `local_shell_call` | 本地 shell 调用 |
+| `compaction` | `compaction` | 压缩摘要项 |
+| `reasoning` | `reasoning` | 推理项 |
 
 ---
 
 ## 关键代码路径与文件引用
 
-### 快照测试定义位置
+### 4.1 测试源文件 → Snapshot 映射
 
-| 快照文件前缀 | 测试源文件 | 测试函数 |
-|-------------|-----------|---------|
-| `all__suite__compact__*` | `codex-rs/core/tests/suite/compact.rs` | 多个测试函数（见下表） |
-| `all__suite__compact_remote__*` | `codex-rs/core/tests/suite/compact_remote.rs` | 远程压缩相关测试 |
-| `all__suite__compact_resume_fork__*` | `codex-rs/core/tests/suite/compact_resume_fork.rs` | 恢复/分支相关测试 |
-| `all__suite__model_visible_layout__*` | `codex-rs/core/tests/suite/model_visible_layout.rs` | 布局快照测试 |
+| 测试源文件 | 生成 Snapshot 数量 | 关键测试函数 |
+|-----------|-------------------|-------------|
+| `compact.rs` | 7 | `pre_sampling_model_switch_compaction`, `manual_compact_*` |
+| `compact_remote.rs` | 14 | `remote_manual_compact_*`, `remote_pre_turn_compaction_*` |
+| `compact_resume_fork.rs` | 1 | `snapshot_rollback_past_compaction_replays_append_only_history` |
+| `model_visible_layout.rs` | 6 | `snapshot_model_visible_layout_*` |
 
-### 核心测试函数与快照对应关系
+### 4.2 核心代码路径
 
-**compact.rs 中的快照测试：**
+```
+codex-rs/core/
+├── tests/
+│   ├── suite/
+│   │   ├── snapshots/              # ← 本目录（快照存储）
+│   │   ├── compact.rs              # 本地 compaction 测试
+│   │   ├── compact_remote.rs       # 远程 compaction 测试
+│   │   ├── compact_resume_fork.rs  # 恢复/分支测试
+│   │   └── model_visible_layout.rs # 模型可见布局测试
+│   └── common/
+│       ├── context_snapshot.rs     # 快照格式化逻辑
+│       ├── responses.rs            # Mock 响应服务器
+│       └── test_codex.rs           # 测试构建器
+└── src/
+    └── compact.rs                  # Compaction 核心实现
+```
 
-| 快照名称 | 测试函数 | 描述 |
-|---------|---------|------|
-| `manual_compact_with_history_shapes` | `summarize_context_three_requests_and_instructions` | 手动压缩保留历史记录 |
-| `manual_compact_without_prev_user_shapes` | （内联在 `summarize_context_*`） | 无前序用户消息的手动压缩 |
-| `pre_turn_compaction_context_window_exceeded_shapes` | `auto_compact_runs_after_token_limit_hit` | 上下文窗口超限的自动压缩 |
-| `pre_turn_compaction_including_incoming_shapes` | `auto_compact_runs_after_resume_when_token_usage_is_over_limit` | 包含传入消息的预回合压缩 |
-| `pre_turn_compaction_strips_incoming_model_switch_shapes` | `pre_sampling_compact_runs_on_switch_to_smaller_context_model` | 压缩时剥离模型切换标记 |
-| `pre_sampling_model_switch_compaction_shapes` | `pre_sampling_compact_runs_on_switch_to_smaller_context_model` | 采样前模型切换压缩 |
-| `mid_turn_compaction_shapes` | `multiple_auto_compact_per_task_runs_after_token_limit_hit` | 回合中多次自动压缩 |
+### 4.3 关键函数调用链
 
-**compact_remote.rs 中的快照测试：**
-
-| 快照名称 | 测试函数 | 描述 |
-|---------|---------|------|
-| `remote_manual_compact_with_history_shapes` | `remote_compact_replaces_history_for_followups` | 远程手动压缩 |
-| `remote_manual_compact_without_prev_user_shapes` | （相关测试） | 无前序用户消息的远程压缩 |
-| `remote_pre_turn_compaction_*` | 多个测试 | 远程预回合压缩场景 |
-| `remote_mid_turn_compaction_*` | 多个测试 | 远程回合中压缩场景 |
-| `remote_compact_resume_*` | 恢复场景测试 | 恢复后的远程压缩 |
-
-**compact_resume_fork.rs 中的快照测试：**
-
-| 快照名称 | 测试函数 | 描述 |
-|---------|---------|------|
-| `rollback_past_compaction_shapes` | `snapshot_rollback_past_compaction_replays_append_only_history` | 回滚过压缩点的历史重放 |
-
-**model_visible_layout.rs 中的快照测试：**
-
-| 快照名称 | 测试函数 | 描述 |
-|---------|---------|------|
-| `model_visible_layout_turn_overrides` | `snapshot_model_visible_layout_turn_overrides` | 回合参数覆盖 |
-| `model_visible_layout_cwd_change_does_not_refresh_agents` | `snapshot_model_visible_layout_cwd_change_does_not_refresh_agents` | cwd 变更不刷新 agents |
-| `model_visible_layout_resume_with_personality_change` | `snapshot_model_visible_layout_resume_with_personality_change` | 恢复时 personality 变更 |
-| `model_visible_layout_resume_override_matches_rollout_model` | `snapshot_model_visible_layout_resume_override_matches_rollout_model` | 覆盖匹配 rollout 模型 |
-| `model_visible_layout_environment_context_includes_*` | 对应测试 | 环境上下文包含子代理 |
-
-### 支持模块
-
-| 文件 | 职责 |
-|-----|------|
-| `codex-rs/core/tests/common/context_snapshot.rs` | 快照格式化核心实现 |
-| `codex-rs/core/tests/common/responses.rs` | Mock 服务器和响应构造工具 |
-| `codex-rs/core/tests/common/test_codex.rs` | 测试用的 Codex 实例构建器 |
-| `codex-rs/core/tests/suite/mod.rs` | 测试模块聚合和初始化 |
+```
+测试函数
+  └─> insta::assert_snapshot!(name, formatted_output)
+        └─> format_labeled_requests_snapshot(scenario, sections, options)
+              └─> context_snapshot::format_request_input_snapshot(request, options)
+                    └─> format_response_items_snapshot(items, options)
+                          └─> canonicalize_snapshot_text(text)  // 规范化
+```
 
 ---
 
 ## 依赖与外部交互
 
-### 内部依赖
+### 5.1 外部依赖
 
-```
-snapshots/ (数据文件)
-    ↑ 读取/生成
-context_snapshot.rs (格式化逻辑)
-    ↑ 使用
-compact.rs, compact_remote.rs, compact_resume_fork.rs, model_visible_layout.rs (测试定义)
-    ↑ 使用
-responses.rs (Mock 服务器)
-    ↑ 使用
-codex_core (被测 crate)
-```
-
-### 外部依赖
-
-| Crate | 用途 |
-|-------|------|
-| `insta` | 快照测试框架，提供 `assert_snapshot!` 宏 |
+| 依赖 | 用途 |
+|-----|------|
+| `insta` | Snapshot 测试框架，提供 `assert_snapshot!` 宏 |
+| `wiremock` | HTTP Mock 服务器，模拟 OpenAI API |
 | `serde_json` | JSON 序列化/反序列化 |
-| `wiremock` | HTTP Mock 服务器 |
 | `tokio` | 异步运行时 |
-| `regex_lite` | 正则表达式处理（路径规范化） |
+| `regex-lite` | 快照文本正则处理 |
 
-### 环境配置
+### 5.2 内部模块依赖
 
-**`INSTA_WORKSPACE_ROOT`** (`lib.rs:34-51`)
-- 在测试初始化时设置，指向 `codex-rs/` 目录
-- 确保 insta 能正确找到快照文件的相对路径
+```rust
+// 测试中使用的主要内部模块
+use core_test_support::context_snapshot;           // 快照格式化
+use core_test_support::responses::*;               // Mock 响应
+use core_test_support::test_codex::test_codex;     // 测试构建器
+use core_test_support::wait_for_event;             // 事件等待
 
-**`CODEX_HOME`** (`mod.rs:15-55`)
-- 测试前临时设置为临时目录，避免污染用户真实配置
-- 测试后恢复原始值
+use codex_core::compact::SUMMARIZATION_PROMPT;     // 压缩提示词
+use codex_protocol::protocol::*;                   // 协议类型
+```
+
+### 5.3 环境配置
+
+```rust
+// tests/common/lib.rs
+#[ctor]
+fn configure_insta_workspace_root_for_snapshot_tests() {
+    // 设置 INSTA_WORKSPACE_ROOT 环境变量
+    // 确保快照文件存储在正确的相对路径
+    unsafe {
+        std::env::set_var("INSTA_WORKSPACE_ROOT", workspace_root);
+    }
+}
+```
 
 ---
 
 ## 风险、边界与改进建议
 
-### 当前风险
+### 6.1 已知风险
 
-1. **快照文件膨胀**
-   - 28 个快照文件已覆盖多种场景，但新增功能可能需要更多快照
-   - 建议：定期审查是否有重复或冗余的快照
+#### 6.1.1 快照脆弱性 (Snapshot Fragility)
 
-2. **规范化遗漏**
-   - 新添加的敏感信息类型（如新指令格式）需要同步更新 `canonicalize_snapshot_text`
-   - 风险：未规范化的动态内容（如时间戳、UUID）会导致测试不稳定
+- **风险**: 任何改变请求/响应格式的代码变更都会导致大量快照测试失败
+- **缓解**: `canonicalize_snapshot_text` 函数将动态内容（如路径、临时ID）替换为占位符
+- **注意**: 新增字段或改变顺序仍需更新快照
 
-3. **跨平台差异**
-   - Windows 路径分隔符、换行符（CRLF vs LF）已通过 `normalize_line_endings` 处理
-   - 但某些平台特定行为（如 shell 命令）仍可能导致差异
+#### 6.1.2 平台差异
 
-### 边界情况
+- **风险**: Windows/Linux/macOS 的路径格式、换行符差异
+- **缓解**: `normalize_line_endings` 和 `normalize_snapshot_line_endings` 统一处理
 
-1. **空历史压缩**
-   - 测试 `manual_compact_without_prev_user_shapes` 覆盖无历史时的压缩行为
-   - 边界：压缩请求应仅包含指令和 summarization prompt
+#### 6.1.3 测试间依赖
 
-2. **多次连续压缩**
-   - `multiple_auto_compact_per_task_runs_after_token_limit_hit` 测试单轮内多次压缩
-   - 边界：需确保 summary 消息的正确堆叠
+- **风险**: 快照测试依赖于特定的 Mock 服务器响应顺序
+- **缓解**: 使用 `mount_sse_sequence` 和请求匹配器确保确定性
 
-3. **实时对话状态**
-   - 远程压缩测试需处理 `<realtime_conversation>` 标记的重新注入
-   - 边界：压缩后恢复对话时，标记顺序必须正确
+### 6.2 边界情况
 
-### 改进建议
+| 边界场景 | 当前处理 |
+|---------|---------|
+| 空历史压缩 | `manual_compact_without_prev_user_shapes.snap` 覆盖 |
+| 上下文窗口超限 | `pre_turn_compaction_context_window_exceeded_shapes.snap` 覆盖 |
+| 远程压缩失败 | `remote_pre_turn_compaction_failure_shapes.snap` 覆盖 |
+| 多子代理环境 | `model_visible_layout_environment_context_includes_*_subagents.snap` 覆盖 |
+| Realtime 会话压缩 | `remote_*_restates_realtime_*.snap` 系列覆盖 |
 
-1. **快照文档化**
-   - 当前快照文件名较长且含义不够直观
-   - 建议：在快照文件头部添加更详细的场景描述注释
+### 6.3 改进建议
 
-2. **自动化审查**
-   - 建议：添加 CI 检查，当 `context_snapshot.rs` 变更时提醒更新相关快照
+#### 6.3.1 快照组织优化
 
-3. **性能优化**
-   - 当前每个快照测试都启动完整 Codex 实例
-   - 建议：考虑共享测试基础设施（如 Mock 服务器）以减少启动开销
+```
+# 当前: 扁平命名
+all__suite__compact__manual_compact_with_history_shapes.snap
 
-4. **覆盖率扩展**
-   - 当前缺少对以下场景的快照覆盖：
-     - 多模态输入（图片 + 文本）的模型可见布局
-     - 工具调用链（function calling chain）的压缩行为
-     - 错误恢复场景（如部分压缩失败）的请求结构
+# 建议: 分层目录结构
+compact/
+  manual/
+    with_history.snap
+    without_prev_user.snap
+  auto/
+    pre_turn_context_window_exceeded.snap
+```
+
+#### 6.3.2 增强快照可读性
+
+- 当前快照使用缩写格式（如 `message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>`）
+- 建议增加可选的详细模式，展示完整 JSON 结构（用于调试）
+
+#### 6.3.3 自动化快照审查
+
+- 建议添加 CI 检查，当快照变更时自动生成可视化 diff 报告
+- 可参考 `cargo insta show` 集成到 PR review 流程
+
+#### 6.3.4 覆盖缺口
+
+- 缺少对 `truncation`（截断）行为的快照覆盖
+- 缺少对多模态输入（图片+文本）的详细布局快照
+- 建议增加对错误恢复路径的快照测试
+
+### 6.4 维护最佳实践
+
+1. **更新快照流程**:
+   ```bash
+   cargo test -p codex-core  # 生成 .snap.new 文件
+   cargo insta review        # 交互式审查变更
+   cargo insta accept        # 接受变更
+   ```
+
+2. **新增快照测试时**:
+   - 使用描述性的场景名称
+   - 确保 `canonicalize_snapshot_text` 处理所有动态内容
+   - 在注释中说明测试的意图和覆盖的边界情况
+
+3. **审查快照变更时**:
+   - 检查是否有意外的字段顺序变化
+   - 验证占位符替换是否完整（无绝对路径残留）
+   - 确认新增/删除的项是否符合预期行为
 
 ---
 
-## 附录：快照文件完整列表
+## 附录: Snapshot 文件完整列表
 
 ```
 codex-rs/core/tests/suite/snapshots/
@@ -309,10 +371,10 @@ codex-rs/core/tests/suite/snapshots/
 ├── all__suite__model_visible_layout__model_visible_layout_environment_context_includes_two_subagents.snap
 ├── all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
 ├── all__suite__model_visible_layout__model_visible_layout_resume_with_personality_change.snap
-└── all__suite__model_visible_layout__model_visible_layout_turn_overrides.snap
+└── all__suite__model_visible_layout__model_visible_layout_turn_overrides_shapes.snap
 ```
 
 ---
 
-*Generated: 2026-03-21*
-*Research Scope: DIR codex-rs/core/tests/suite/snapshots*
+*文档生成时间: 2026-03-21*
+*基于 codex-rs 仓库 commit: HEAD*
