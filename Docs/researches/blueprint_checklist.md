@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-20 11:16:01 +0800
+Generated at: 2026-03-20 11:26:01 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -130,7 +130,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/016_pure_addition_update_chunk
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/016_pure_addition_update_chunk/expected
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/016_pure_addition_update_chunk/input
-- [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/017_whitespace_padded_hunk_header
+- [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/017_whitespace_padded_hunk_header
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/017_whitespace_padded_hunk_header/expected
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/017_whitespace_padded_hunk_header/input
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/018_whitespace_padded_patch_markers
