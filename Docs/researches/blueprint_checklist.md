@@ -213,7 +213,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/core/src/context_manager
 - [x] [DIR] codex-rs/core/src/features
 - [x] [DIR] codex-rs/core/src/guardian
-- [ ] [DIR] codex-rs/core/src/guardian/snapshots
+- [x] [DIR] codex-rs/core/src/guardian/snapshots
 - [ ] [DIR] codex-rs/core/src/instructions
 - [ ] [DIR] codex-rs/core/src/mcp
 - [ ] [DIR] codex-rs/core/src/memories
