@@ -228,7 +228,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/core/src/tools
 - [x] [DIR] codex-rs/core/src/tools/code_mode
 - [x] [DIR] codex-rs/core/src/tools/handlers
-- [ ] [DIR] codex-rs/core/src/tools/handlers/multi_agents
+- [x] [DIR] codex-rs/core/src/tools/handlers/multi_agents
 - [ ] [DIR] codex-rs/core/src/tools/js_repl
 - [ ] [DIR] codex-rs/core/src/tools/runtimes
 - [ ] [DIR] codex-rs/core/src/tools/runtimes/shell

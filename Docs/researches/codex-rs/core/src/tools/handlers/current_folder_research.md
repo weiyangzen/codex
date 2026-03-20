@@ -1,200 +1,167 @@
-# 研究文档: codex-rs/core/src/tools/handlers
+# Research: DIR codex-rs/core/src/tools/handlers
 
-## 概述
+## 场景与职责
 
-`codex-rs/core/src/tools/handlers` 是 Codex 工具系统的核心处理器目录，负责实现所有 LLM 可调用的工具（Tool）的具体执行逻辑。该目录包含 40 个 Rust 源文件，实现了 20+ 种不同的工具处理器，涵盖文件操作、代码编辑、命令执行、多智能体协作、MCP 集成等核心功能。
+`codex-rs/core/src/tools/handlers` 是 Codex 工具系统的核心处理器目录，负责实现所有 AI 可调用的工具（Tools）的具体执行逻辑。该目录位于 Codex Rust 核心代码库中，是连接模型意图与实际系统操作的桥梁。
 
----
+### 核心职责
 
-## 1. 场景与职责
+1. **工具执行**: 实现 20+ 种工具的具体执行逻辑，包括文件操作、代码编辑、Shell 执行、Agent 协作等
+2. **权限管控**: 集成沙箱系统，确保所有敏感操作都经过适当的权限审批
+3. **结果格式化**: 将工具执行结果转换为模型可理解的格式
+4. **事件通知**: 向客户端发送工具执行状态事件，支持 TUI 实时展示
 
-### 1.1 核心职责
+### 使用场景
 
-| 职责领域 | 描述 |
-|---------|------|
-| **工具执行** | 接收 LLM 的工具调用请求，执行具体操作并返回结果 |
-| **权限控制** | 验证和执行沙箱权限、文件系统权限、网络权限 |
-| **审批流程** | 管理需要用户确认的危险操作（如执行命令、修改文件） |
-| **事件发射** | 向客户端发送工具执行状态事件（开始、结束、失败） |
-| **结果格式化** | 将工具输出转换为 LLM 可理解的响应格式 |
-
-### 1.2 使用场景
-
-1. **文件系统操作**: 读取文件 (`read_file`)、列出目录 (`list_dir`)、搜索文件 (`grep_files`)
-2. **代码编辑**: 应用补丁 (`apply_patch`) - 支持自由格式和 JSON 格式
-3. **命令执行**: 执行 shell 命令 (`shell`, `shell_command`, `exec_command`)
-4. **多智能体协作**: 生成子代理 (`spawn_agent`)、发送输入 (`send_input`)、等待完成 (`wait_agent`)
-5. **批量任务处理**: CSV 驱动的批量代理作业 (`spawn_agents_on_csv`)
-6. **MCP 集成**: 调用 MCP 工具 (`mcp`)、访问 MCP 资源 (`mcp_resource`)
-7. **动态工具**: 客户端提供的动态工具调用 (`dynamic`)
-8. **交互式工具**: 请求用户输入 (`request_user_input`)、请求权限 (`request_permissions`)
-9. **JavaScript REPL**: 执行 JS 代码 (`js_repl`, `js_repl_reset`)
-10. **Artifact 构建**: 执行 Artifact 工具 (`artifacts`)
+- **代码编辑**: 通过 `apply_patch` 工具安全地修改代码文件
+- **文件浏览**: 使用 `read_file`、`list_dir`、`grep_files` 浏览代码库
+- **命令执行**: 通过 `shell`、`shell_command`、`unified_exec` 执行系统命令
+- **Agent 协作**: 使用多 Agent 工具（`spawn_agent`、`send_input`、`wait_agent` 等）实现并行任务处理
+- **MCP 集成**: 通过 `mcp`、`mcp_resource` 调用外部 MCP 服务器工具
+- **权限申请**: 通过 `request_permissions` 动态申请额外权限
 
 ---
 
-## 2. 功能点目的
+## 功能点目的
 
-### 2.1 文件操作类工具
+### 1. 文件操作类工具
 
-#### `read_file.rs` - 文件读取
-- **目的**: 读取文件内容，支持两种模式
-  - `Slice` 模式: 按行范围读取（offset/limit）
-  - `Indentation` 模式: 智能缩进感知读取，用于代码块分析
-- **关键特性**:
-  - 最大行长度限制 (500 字符)
-  - 制表符宽度处理 (4 空格)
-  - 注释前缀识别 (`#`, `//`, `--`)
+| 工具 | 文件 | 目的 |
+|------|------|------|
+| `read_file` | `read_file.rs` | 读取文件内容，支持行号切片和缩进感知模式 |
+| `list_dir` | `list_dir.rs` | 列出目录内容，支持深度限制和分页 |
+| `grep_files` | `grep_files.rs` | 使用 ripgrep 搜索文件内容 |
+| `apply_patch` | `apply_patch.rs` | 安全地应用代码补丁，支持 Add/Update/Delete 操作 |
 
-#### `list_dir.rs` - 目录列表
-- **目的**: 递归列出目录内容
-- **关键特性**:
-  - 支持深度限制（默认 2 层）
-  - 分页支持（offset/limit）
-  - 文件类型标记（目录 `/`、符号链接 `@`、其他 `?`）
+### 2. 命令执行类工具
 
-#### `grep_files.rs` - 文件搜索
-- **目的**: 使用 ripgrep 搜索文件内容
-- **关键特性**:
-  - 基于 `rg` 命令行工具
-  - 支持 glob 过滤 (`--glob`)
-  - 默认限制 100 条结果，最大 2000 条
-  - 30 秒超时保护
+| 工具 | 文件 | 目的 |
+|------|------|------|
+| `shell` | `shell.rs` | 执行数组形式的 shell 命令 |
+| `shell_command` | `shell.rs` | 执行字符串形式的 shell 命令 |
+| `unified_exec` | `unified_exec.rs` | 统一执行框架，支持 TTY 和交互式命令 |
 
-### 2.2 代码编辑类工具
+### 3. Agent 协作类工具
 
-#### `apply_patch.rs` - 补丁应用
-- **目的**: 应用代码补丁，支持文件增删改
-- **两种格式**:
-  - **Freeform**: 使用 Lark 语法定义的自定义 DSL
-  - **JSON**: 标准 JSON Schema 格式
-- **安全特性**:
-  - 补丁语法验证
-  - 文件路径权限检查
-  - 自动拦截通过 shell 执行的补丁命令
+| 工具 | 文件 | 目的 |
+|------|------|------|
+| `spawn_agent` | `multi_agents/spawn.rs` | 创建子 Agent 处理并行任务 |
+| `close_agent` | `multi_agents/close_agent.rs` | 关闭指定 Agent |
+| `send_input` | `multi_agents/send_input.rs` | 向 Agent 发送输入 |
+| `wait_agent` | `multi_agents/wait.rs` | 等待 Agent 完成 |
+| `resume_agent` | `multi_agents/resume_agent.rs` | 恢复已关闭的 Agent |
 
-**补丁 DSL 语法示例**:
+### 4. MCP 集成类工具
+
+| 工具 | 文件 | 目的 |
+|------|------|------|
+| `mcp` | `mcp.rs` | 调用 MCP 服务器工具 |
+| `mcp_resource` | `mcp_resource.rs` | 访问 MCP 资源（list/read resources） |
+
+### 5. 其他工具
+
+| 工具 | 文件 | 目的 |
+|------|------|------|
+| `tool_search` | `tool_search.rs` | 使用 BM25 算法搜索可用工具 |
+| `tool_suggest` | `tool_suggest.rs` | 向用户推荐并安装工具 |
+| `request_permissions` | `request_permissions.rs` | 申请额外权限 |
+| `request_user_input` | `request_user_input.rs` | 请求用户输入 |
+| `view_image` | `view_image.rs` | 加载并查看本地图片 |
+| `update_plan` | `plan.rs` | 更新任务计划 |
+| `artifacts` | `artifacts.rs` | 执行 Artifact JavaScript 代码 |
+| `js_repl` | `js_repl.rs` | JavaScript REPL 执行 |
+| `agent_jobs` | `agent_jobs.rs` | 批量 CSV 任务处理 |
+| `test_sync` | `test_sync.rs` | 测试同步工具（Barrier 同步） |
+
+---
+
+## 具体技术实现
+
+### 关键流程
+
+#### 1. 工具调用流程
+
 ```
-*** Begin Patch
-*** Add File: hello.txt
-+Hello world
-*** Update File: src/app.py
-@@ def greet()
--print("Hi")
-+print("Hello, world!")
-*** Delete File: obsolete.txt
-*** End Patch
+ToolRouter::dispatch_tool_call_with_code_mode_result
+  └── ToolRegistry::dispatch_any
+      └── ToolHandler::handle
 ```
 
-### 2.3 命令执行类工具
+**关键代码路径**:
+- `codex-rs/core/src/tools/router.rs:214-251` - 工具路由分发
+- `codex-rs/core/src/tools/registry.rs:160-312` - 注册表调度逻辑
 
-#### `shell.rs` - Shell 命令执行
-- **目的**: 执行 shell 命令（数组格式参数）
-- **安全特性**:
-  - 命令安全检测 (`is_known_safe_command`)
-  - 沙箱权限控制
-  - 额外权限请求支持
+#### 2. 权限审批流程
 
-#### `unified_exec.rs` - 统一执行框架
-- **目的**: 支持交互式命令执行（PTY）
-- **关键特性**:
-  - 进程会话管理（`session_id`）
-  - 标准输入写入（`write_stdin`）
-  - TTY 分配支持
-  - 输出截断控制 (`max_output_tokens`)
+```
+ToolOrchestrator::run
+  ├── 1. Approval (权限审批)
+  │   └── Approvable::start_approval_async
+  ├── 2. First Attempt (首次沙箱尝试)
+  │   └── ToolRuntime::run
+  └── 3. Retry without Sandbox (如需要，无沙箱重试)
+```
 
-### 2.4 多智能体协作工具
+**关键代码路径**:
+- `codex-rs/core/src/tools/orchestrator.rs:100-347` - 编排器主流程
 
-#### `multi_agents.rs` + `multi_agents/` 子模块
-- **子模块**:
-  - `spawn.rs`: 生成子代理
-  - `send_input.rs`: 向代理发送输入
-  - `wait.rs`: 等待代理完成
-  - `resume_agent.rs`: 恢复暂停的代理
-  - `close_agent.rs`: 关闭代理
-- **关键特性**:
-  - 代理深度限制 (`agent_max_depth`)
-  - 配置继承机制
-  - 等待超时控制 (10s - 3600s)
+#### 3. apply_patch 执行流程
 
-#### `agent_jobs.rs` - 批量作业
-- **目的**: CSV 驱动的批量代理任务处理
-- **关键特性**:
-  - 并发控制（默认 16，最大 64）
-  - 作业进度追踪
-  - 结果导出到 CSV
-  - 作业超时保护
+```
+ApplyPatchHandler::handle
+  ├── codex_apply_patch::maybe_parse_apply_patch_verified (解析补丁)
+  ├── effective_patch_permissions (计算权限)
+  ├── apply_patch::apply_patch (尝试应用)
+  └── 如需要: ToolOrchestrator::run (委托执行)
+```
 
-### 2.5 MCP 集成工具
+**关键代码路径**:
+- `codex-rs/core/src/tools/handlers/apply_patch.rs:146-257`
 
-#### `mcp.rs` - MCP 工具调用
-- **目的**: 调用 Model Context Protocol 工具
-- **实现**: 委托给 `mcp_tool_call::handle_mcp_tool_call`
+#### 4. Agent 批量任务流程 (agent_jobs)
 
-#### `mcp_resource.rs` - MCP 资源访问
-- **目的**: 访问 MCP 服务器资源
-- **支持操作**:
-  - `list_mcp_resources`: 列出资源
-  - `list_mcp_resource_templates`: 列出资源模板
-  - `read_mcp_resource`: 读取资源内容
+```
+BatchJobHandler::handle
+  └── spawn_agents_on_csv::handle
+      ├── parse_csv (解析 CSV)
+      ├── create_agent_job (创建任务)
+      └── run_agent_job_loop (执行循环)
+          ├── spawn_agent (创建 Worker)
+          ├── wait_for_final_status (等待完成)
+          └── export_job_csv_snapshot (导出结果)
+```
 
-### 2.6 交互式工具
+**关键代码路径**:
+- `codex-rs/core/src/tools/handlers/agent_jobs.rs:221-467`
 
-#### `request_permissions.rs` - 权限请求
-- **目的**: 请求额外的文件系统或网络权限
-- **权限类型**:
-  - 网络访问 (`network.enabled`)
-  - 文件系统读 (`file_system.read`)
-  - 文件系统写 (`file_system.write`)
+### 关键数据结构
 
-#### `request_user_input.rs` - 用户输入请求
-- **目的**: 向用户展示问题并等待回答
-- **限制**: 仅支持 1-3 个问题，每个问题必须有选项
-
-### 2.7 其他工具
-
-#### `tool_search.rs` - 工具搜索
-- **目的**: 使用 BM25 算法搜索可用 MCP 工具
-- **实现**: 基于 `bm25` crate 的文档搜索
-
-#### `tool_suggest.rs` - 工具推荐
-- **目的**: 推荐并安装 Connector 或 Plugin
-- **流程**: 推荐 → 用户确认 → 安装验证
-
-#### `js_repl.rs` - JavaScript REPL
-- **目的**: 执行 JavaScript 代码
-- **特性**:
-  - 支持 `// codex-js-repl: timeout_ms=5000` 指令
-  - 拒绝 JSON 或 Markdown 格式的输入
-
-#### `artifacts.rs` - Artifact 构建
-- **目的**: 执行 Artifact 工具构建
-- **特性**:
-  - 支持 `// codex-artifact-tool: timeout_ms=...` 指令
-  - 默认 30 秒超时
-
-#### `dynamic.rs` - 动态工具
-- **目的**: 处理客户端提供的动态工具调用
-- **机制**: 通过 oneshot channel 等待客户端响应
-
-#### `plan.rs` - 计划更新
-- **目的**: 允许模型更新任务计划（结构化输出）
-- **注意**: 在 Plan 模式下不可用
-
-#### `view_image.rs` - 图像查看
-- **目的**: 加载本地图像并返回 data URL
-- **特性**:
-  - 支持 `original` 详情模式
-  - 图像尺寸自适应
-
----
-
-## 3. 具体技术实现
-
-### 3.1 核心 trait 架构
-
+#### ToolInvocation (工具调用上下文)
 ```rust
-// 工具处理器核心 trait (registry.rs)
+pub struct ToolInvocation {
+    pub session: Arc<Session>,           // 会话上下文
+    pub turn: Arc<TurnContext>,          // 当前 Turn 上下文
+    pub tracker: SharedTurnDiffTracker,  // 差异追踪
+    pub call_id: String,                 // 调用 ID
+    pub tool_name: String,               // 工具名称
+    pub tool_namespace: Option<String>,  // 命名空间
+    pub payload: ToolPayload,            // 负载数据
+}
+```
+
+#### ToolPayload (工具负载类型)
+```rust
+pub enum ToolPayload {
+    Function { arguments: String },           // JSON 参数
+    ToolSearch { arguments: SearchToolCallParams },
+    Custom { input: String },                 // 自由格式输入
+    LocalShell { params: ShellToolCallParams },
+    Mcp { server: String, tool: String, raw_arguments: String },
+}
+```
+
+#### ToolHandler Trait (处理器接口)
+```rust
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
     type Output: ToolOutput + 'static;
@@ -203,363 +170,261 @@ pub trait ToolHandler: Send + Sync {
     async fn is_mutating(&self, _invocation: &ToolInvocation) -> bool;
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError>;
 }
+```
 
-// 工具输出 trait (context.rs)
-pub trait ToolOutput: Send {
-    fn log_preview(&self) -> String;
-    fn success_for_logging(&self) -> bool;
-    fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem;
-    fn code_mode_result(&self, payload: &ToolPayload) -> JsonValue;
+### 协议与命令
+
+#### 1. apply_patch 补丁格式
+
+使用自定义补丁语言，语法定义在 `tool_apply_patch.lark`:
+
+```
+*** Begin Patch
+*** Add File: <path>
++<content>
+*** Update File: <path>
+*** Move to: <new_path> (可选)
+@@ <context>
+-<old_line>
++<new_line>
+*** Delete File: <path>
+*** End Patch
+```
+
+#### 2. Shell 命令执行参数
+
+```rust
+pub struct ShellToolCallParams {
+    pub command: Vec<String>,           // 命令数组
+    pub workdir: Option<String>,        // 工作目录
+    pub timeout_ms: Option<u64>,        // 超时
+    pub sandbox_permissions: Option<SandboxPermissions>,
+    pub additional_permissions: Option<PermissionProfile>,
+    pub prefix_rule: Option<Vec<String>>,
+    pub justification: Option<String>,
 }
 ```
 
-### 3.2 工具调用流程
-
-```
-┌─────────────────┐
-│  LLM Tool Call  │
-└────────┬────────┘
-         ▼
-┌─────────────────┐     ┌─────────────────┐
-│  ToolRouter::   │────▶│  ToolRegistry:: │
-│  build_tool_call│     │  dispatch_any   │
-└─────────────────┘     └────────┬────────┘
-                                 ▼
-                        ┌─────────────────┐
-                        │  ToolHandler::  │
-                        │     handle      │
-                        └────────┬────────┘
-                                 ▼
-                        ┌─────────────────┐
-                        │   ToolOutput    │
-                        │ to_response_item│
-                        └─────────────────┘
-```
-
-### 3.3 权限验证流程 (mod.rs)
+#### 3. Agent 协作消息格式
 
 ```rust
-// 1. 应用已授予的权限
-let effective = apply_granted_turn_permissions(session, sandbox_permissions, additional_permissions).await;
-
-// 2. 验证额外权限
-let normalized = normalize_and_validate_additional_permissions(
-    additional_permissions_allowed,
-    approval_policy,
-    effective.sandbox_permissions,
-    effective.additional_permissions,
-    effective.permissions_preapproved,
-    cwd,
-)?;
-
-// 3. 隐式权限处理
-let implicit = implicit_granted_permissions(sandbox_permissions, requested, &effective);
-```
-
-### 3.4 沙箱执行流程 (orchestrator.rs)
-
-```
-┌─────────────────────────────────────────┐
-│  1. 审批检查 (ExecApprovalRequirement)   │
-└─────────────────┬───────────────────────┘
-                  ▼
-┌─────────────────────────────────────────┐
-│  2. 选择沙箱 (SandboxManager::select)   │
-└─────────────────┬───────────────────────┘
-                  ▼
-┌─────────────────────────────────────────┐
-│  3. 首次执行尝试                         │
-└─────────────────┬───────────────────────┘
-                  ▼
-        ┌─────────────────┐
-        │  成功?          │
-        └────────┬────────┘
-           是 /    \ 否
-            /      \
-           ▼        ▼
-    ┌──────────┐  ┌─────────────────────────┐
-    │ 返回结果  │  │ 4. 请求无沙箱执行权限     │
-    └──────────┘  └──────────┬──────────────┘
-                             ▼
-                    ┌─────────────────┐
-                    │  用户批准?       │
-                    └────────┬────────┘
-                       是 /    \ 否
-                        /      \
-                       ▼        ▼
-                ┌──────────┐  ┌──────────┐
-                │ 重试执行  │  │ 返回错误  │
-                │ (无沙箱)  │  │          │
-                └──────────┘  └──────────┘
-```
-
-### 3.5 关键数据结构
-
-#### ToolInvocation (context.rs)
-```rust
-pub struct ToolInvocation {
-    pub session: Arc<Session>,           // 会话上下文
-    pub turn: Arc<TurnContext>,          // 当前回合上下文
-    pub tracker: SharedTurnDiffTracker,  // 差异追踪
-    pub call_id: String,                 // 调用 ID
-    pub tool_name: String,               // 工具名称
-    pub tool_namespace: Option<String>,  // 命名空间（MCP）
-    pub payload: ToolPayload,            // 负载数据
-}
-```
-
-#### ToolPayload 枚举 (context.rs)
-```rust
-pub enum ToolPayload {
-    Function { arguments: String },                    // 标准函数调用
-    ToolSearch { arguments: SearchToolCallParams },   // 工具搜索
-    Custom { input: String },                          // 自定义输入
-    LocalShell { params: ShellToolCallParams },       // 本地 shell
-    Mcp { server, tool, raw_arguments },              // MCP 调用
-}
-```
-
-#### ExecCommandToolOutput (context.rs)
-```rust
-pub struct ExecCommandToolOutput {
-    pub event_call_id: String,
-    pub chunk_id: String,
-    pub wall_time: Duration,
-    pub raw_output: Vec<u8>,
-    pub max_output_tokens: Option<usize>,
-    pub process_id: Option<i32>,
-    pub exit_code: Option<i32>,
-    pub original_token_count: Option<usize>,
-    pub session_command: Option<Vec<String>>,
+pub struct SpawnAgentArgs {
+    pub message: Option<String>,
+    pub items: Option<Vec<UserInput>>,
+    pub agent_type: Option<String>,    // 角色类型
+    pub model: Option<String>,          // 指定模型
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub fork_context: bool,
 }
 ```
 
 ---
 
-## 4. 关键代码路径与文件引用
+## 关键代码路径与文件引用
 
-### 4.1 入口点
+### 核心文件结构
 
-| 文件 | 职责 |
-|-----|------|
-| `mod.rs` | 模块组织、公共导出、权限验证工具函数 |
-| `router.rs` | 工具路由：将 LLM 响应转换为 ToolCall |
-| `registry.rs` | 工具注册表：存储和分发处理器 |
-
-### 4.2 处理器实现
-
-| 文件 | 处理器 | 输出类型 |
-|-----|--------|---------|
-| `read_file.rs` | `ReadFileHandler` | `FunctionToolOutput` |
-| `list_dir.rs` | `ListDirHandler` | `FunctionToolOutput` |
-| `grep_files.rs` | `GrepFilesHandler` | `FunctionToolOutput` |
-| `apply_patch.rs` | `ApplyPatchHandler` | `ApplyPatchToolOutput` |
-| `shell.rs` | `ShellHandler`, `ShellCommandHandler` | `FunctionToolOutput` |
-| `unified_exec.rs` | `UnifiedExecHandler` | `ExecCommandToolOutput` |
-| `multi_agents.rs` | 子模块聚合 | `FunctionToolOutput` |
-| `agent_jobs.rs` | `BatchJobHandler` | `FunctionToolOutput` |
-| `mcp.rs` | `McpHandler` | `CallToolResult` |
-| `mcp_resource.rs` | `McpResourceHandler` | `FunctionToolOutput` |
-| `dynamic.rs` | `DynamicToolHandler` | `FunctionToolOutput` |
-| `js_repl.rs` | `JsReplHandler`, `JsReplResetHandler` | `FunctionToolOutput` |
-| `artifacts.rs` | `ArtifactsHandler` | `FunctionToolOutput` |
-| `tool_search.rs` | `ToolSearchHandler` | `ToolSearchOutput` |
-| `tool_suggest.rs` | `ToolSuggestHandler` | `FunctionToolOutput` |
-| `request_permissions.rs` | `RequestPermissionsHandler` | `FunctionToolOutput` |
-| `request_user_input.rs` | `RequestUserInputHandler` | `FunctionToolOutput` |
-| `view_image.rs` | `ViewImageHandler` | `ViewImageOutput` |
-| `plan.rs` | `PlanHandler` | `PlanToolOutput` |
-
-### 4.3 测试文件
-
-| 文件 | 测试内容 |
-|-----|---------|
-| `*_tests.rs` | 各处理器的单元测试 |
-
-### 4.4 关键调用链
-
-**文件读取流程**:
 ```
-read_file.rs:102 handle()
-  ├── parse_arguments() (mod.rs:64)
-  ├── slice::read() / indentation::read_block()
-  │   └── tokio::fs::File::open()
-  └── FunctionToolOutput::from_text()
+codex-rs/core/src/tools/handlers/
+├── mod.rs                    # 模块导出，权限验证工具函数
+├── apply_patch.rs            # 代码补丁应用 (466 lines)
+├── shell.rs                  # Shell 命令执行 (499 lines)
+├── unified_exec.rs           # 统一执行框架 (362 lines)
+├── read_file.rs              # 文件读取 (489 lines)
+├── list_dir.rs               # 目录列表 (271 lines)
+├── grep_files.rs             # 文件搜索 (176 lines)
+├── mcp.rs                    # MCP 工具调用 (58 lines)
+├── mcp_resource.rs           # MCP 资源访问 (667 lines)
+├── dynamic.rs                # 动态工具 (134 lines)
+├── js_repl.rs                # JavaScript REPL (296 lines)
+├── artifacts.rs              # Artifact 执行 (295 lines)
+├── plan.rs                   # 计划更新 (153 lines)
+├── tool_search.rs            # 工具搜索 (192 lines)
+├── tool_suggest.rs           # 工具推荐 (320 lines)
+├── request_permissions.rs    # 权限申请 (74 lines)
+├── request_user_input.rs     # 用户输入请求 (125 lines)
+├── view_image.rs             # 图片查看 (230 lines)
+├── agent_jobs.rs             # 批量 Agent 任务 (1000+ lines)
+├── test_sync.rs              # 测试同步 (154 lines)
+└── multi_agents/             # 多 Agent 协作子模块
+    ├── mod.rs                # 公共函数和配置构建
+    ├── spawn.rs              # 创建 Agent (198 lines)
+    ├── close_agent.rs        # 关闭 Agent (125 lines)
+    ├── send_input.rs         # 发送输入 (118 lines)
+    ├── wait.rs               # 等待 Agent (228 lines)
+    └── resume_agent.rs       # 恢复 Agent (167 lines)
 ```
 
-**Shell 执行流程**:
-```
-shell.rs:178 handle()
-  ├── resolve_workdir_base_path() (mod.rs:84)
-  ├── ShellHandler::to_exec_params()
-  ├── ShellHandler::run_exec_like()
-  │   ├── apply_granted_turn_permissions() (mod.rs:184)
-  │   ├── normalize_and_validate_additional_permissions() (mod.rs:102)
-  │   ├── intercept_apply_patch() (apply_patch.rs:262)
-  │   └── ToolOrchestrator::run() (orchestrator.rs:100)
-  │       └── ShellRuntime::run()
-  └── emitter.finish()
-```
+### 依赖文件
+
+| 依赖路径 | 用途 |
+|----------|------|
+| `codex-rs/core/src/tools/registry.rs` | ToolHandler trait 定义和注册表实现 |
+| `codex-rs/core/src/tools/context.rs` | ToolInvocation, ToolPayload, ToolOutput 定义 |
+| `codex-rs/core/src/tools/orchestrator.rs` | ToolOrchestrator 权限和沙箱编排 |
+| `codex-rs/core/src/tools/sandboxing.rs` | 沙箱和审批 trait 定义 |
+| `codex-rs/core/src/tools/spec.rs` | 工具 Schema 定义和构建 |
+| `codex-rs/core/src/tools/router.rs` | 工具路由和分发 |
+| `codex-rs/core/src/tools/events.rs` | 工具执行事件发射 |
+| `codex-rs/core/src/sandboxing/mod.rs` | 沙箱权限类型定义 |
+| `codex-rs/core/src/codex/mod.rs` | Session 和 TurnContext 定义 |
 
 ---
 
-## 5. 依赖与外部交互
+## 依赖与外部交互
 
-### 5.1 内部依赖
+### 内部依赖
 
+```mermaid
+flowchart TD
+    A[handlers/mod.rs] --> B[registry.rs]
+    A --> C[context.rs]
+    A --> D[orchestrator.rs]
+    A --> E[sandboxing.rs]
+    
+    F[apply_patch.rs] --> G[codex_apply_patch crate]
+    F --> H[apply_patch runtime]
+    
+    I[shell.rs] --> J[ShellRuntime]
+    I --> D
+    
+    K[unified_exec.rs] --> L[UnifiedExecProcessManager]
+    
+    M[mcp.rs] --> N[mcp_connection_manager]
+    O[mcp_resource.rs] --> N
+    
+    P[multi_agents] --> Q[agent_control]
+    P --> R[codex_state]
+    
+    S[agent_jobs.rs] --> R
+    S --> Q
 ```
-tools/handlers/
-├── 依赖 tools/context.rs      # ToolInvocation, ToolPayload, ToolOutput
-├── 依赖 tools/registry.rs     # ToolHandler trait, ToolRegistry
-├── 依赖 tools/orchestrator.rs # ToolOrchestrator
-├── 依赖 tools/sandboxing.rs   # 沙箱抽象
-├── 依赖 tools/events.rs       # 事件发射
-├── 依赖 tools/spec.rs         # 工具规格定义
-├── 依赖 codex::Session        # 会话管理
-├── 依赖 codex::TurnContext    # 回合上下文
-└── 依赖 sandboxing/           # 沙箱实现
-```
 
-### 5.2 外部 crate 依赖
+### 外部 Crate 依赖
 
 | Crate | 用途 |
 |-------|------|
-| `async-trait` | 异步 trait 支持 |
-| `serde`/`serde_json` | 参数序列化/反序列化 |
-| `tokio` | 异步运行时、文件 IO |
-| `bm25` | 工具搜索算法 |
-| `rmcp` | MCP 协议实现 |
+| `codex_protocol` | 协议类型（ThreadId, AgentStatus, EventMsg 等） |
 | `codex_apply_patch` | 补丁解析和应用 |
-| `codex_artifacts` | Artifact 运行时 |
-| `codex_protocol` | 协议类型定义 |
+| `codex_artifacts` | Artifact 运行时管理 |
+| `codex_state` | Agent Job 状态存储 |
+| `codex_hooks` | 工具使用后的 Hook 调用 |
+| `codex_otel` | 遥测和指标收集 |
+| `codex_utils_absolute_path` | 绝对路径处理 |
+| `bm25` | 工具搜索的 BM25 算法 |
+| `rmcp` | MCP 协议类型 |
+| `async_trait` | 异步 trait 支持 |
+| `serde`/`serde_json` | 序列化 |
+| `tokio` | 异步运行时 |
 
-### 5.3 外部工具依赖
+### 与 Session/TurnContext 的交互
 
-| 工具 | 用途 |
-|-----|------|
-| `rg` (ripgrep) | `grep_files` 实现 |
-| `zsh` | `ShellCommandZshFork` 后端 |
+所有处理器都通过 `ToolInvocation` 接收:
 
-### 5.4 事件发射
+- `session: Arc<Session>` - 访问 services（agent_control, mcp_connection_manager 等）
+- `turn: Arc<TurnContext>` - 访问当前 Turn 的配置、沙箱策略、cwd 等
+- `tracker: SharedTurnDiffTracker` - 追踪文件变更
 
-所有工具通过 `ToolEmitter` 发射事件:
-
+**关键交互示例**:
 ```rust
-// 开始执行
-emitter.begin(event_ctx).await;
+// 发送事件到客户端
+session.send_event(turn, EventMsg::Xxx(...)).await;
 
-// 完成执行
-let content = emitter.finish(event_ctx, out).await?;
+// 调用 Agent 控制
+session.services.agent_control.spawn_agent(...).await;
+
+// 访问 MCP 工具
+session.services.mcp_connection_manager.read().await.list_all_tools();
+
+// 请求权限
+session.request_permissions(turn, call_id, args).await;
 ```
 
-事件类型定义在 `codex_protocol::protocol::EventMsg`:
-- `ExecCommandBegin` / `ExecCommandEnd`
-- `PatchApplyBegin` / `PatchApplyEnd`
-- `McpToolCallBegin` / `McpToolCallEnd`
-- `DynamicToolCallRequest` / `DynamicToolCallResponse`
+---
+
+## 风险、边界与改进建议
+
+### 已知风险
+
+1. **权限提升风险**
+   - `additional_permissions` 和 `sandbox_permissions` 的组合需要严格验证
+   - `normalize_and_validate_additional_permissions` 函数（mod.rs:102-159）是安全关键路径
+
+2. **命令注入风险**
+   - Shell 工具使用 `is_known_safe_command` 进行安全检查
+   - 但仍需警惕通过 `additional_permissions` 绕过的场景
+
+3. **Agent 深度限制**
+   - `agent_max_depth` 配置防止无限递归创建 Agent
+   - 超过限制时返回 `"Agent depth limit reached"` 错误
+
+4. **CSV 任务超时**
+   - `agent_jobs.rs` 的 `DEFAULT_AGENT_JOB_ITEM_TIMEOUT` 为 30 分钟
+   - 长时间运行的 Worker 可能导致资源泄漏
+
+### 边界情况
+
+1. **apply_patch 并发**
+   - 同一文件的并发修改可能导致冲突
+   - 依赖 `TurnDiffTracker` 进行变更追踪
+
+2. **MCP 服务器不可用**
+   - `mcp.rs` 和 `mcp_resource.rs` 需要处理服务器断开情况
+   - 当前实现会返回错误给模型
+
+3. **Barrier 同步泄漏**
+   - `test_sync.rs` 的 Barrier 在超时后可能残留
+   - Leader 负责清理，但异常情况下可能泄漏
+
+4. **图片大小限制**
+   - `view_image.rs` 依赖 `load_for_prompt_bytes` 进行图片处理
+   - 超大图片可能导致内存问题
+
+### 改进建议
+
+1. **性能优化**
+   - `grep_files.rs` 当前使用 `rg` 进程调用，可考虑集成 `ripgrep` crate 直接调用
+   - `tool_search.rs` 的 BM25 索引可缓存，避免每次重建
+
+2. **错误处理增强**
+   - 统一工具错误码，便于客户端处理
+   - 增加更多可恢复错误的重试逻辑
+
+3. **可观测性**
+   - 为每个工具增加详细的执行指标（延迟、成功率、资源使用）
+   - 增加工具调用链追踪（特别是 Agent 协作场景）
+
+4. **安全加固**
+   - 对 `dynamic.rs` 的动态工具调用增加更多验证
+   - 考虑为 `js_repl.rs` 和 `artifacts.rs` 增加执行资源限制
+
+5. **代码重构**
+   - `agent_jobs.rs` 超过 1000 行，建议按功能拆分为子模块
+   - `multi_agents/mod.rs` 的 `build_agent_spawn_config` 逻辑可进一步简化
 
 ---
 
-## 6. 风险、边界与改进建议
+## 测试覆盖
 
-### 6.1 安全风险
+每个处理器都有对应的测试文件:
 
-| 风险点 | 描述 | 缓解措施 |
-|-------|------|---------|
-| **命令注入** | Shell 命令可能包含恶意代码 | 沙箱执行、权限验证、命令白名单 |
-| **路径遍历** | 文件操作可能访问敏感路径 | 绝对路径验证、沙箱策略 |
-| **资源耗尽** | 大文件读取或长时间执行 | 超时控制、输出截断、行数限制 |
-| **权限提升** | 通过 `require_escalated` 绕过沙箱 | 用户审批、策略检查 |
-
-### 6.2 已知边界
-
-1. **grep_files 限制**:
-   - 依赖外部 `rg` 命令
-   - 30 秒硬编码超时
-   - 仅返回匹配文件列表，不包含行内容
-
-2. **read_file 限制**:
-   - 单行最大 500 字符截断
-   - 缩进模式仅支持空格/制表符
-
-3. **apply_patch 限制**:
-   - 自定义 DSL 需要模型训练支持
-   - 复杂合并冲突需要人工解决
-
-4. **多智能体限制**:
-   - 最大深度限制（默认 3）
-   - 最大并发限制（64）
-
-### 6.3 改进建议
-
-#### 短期改进
-
-1. **增强错误信息**:
-   ```rust
-   // 当前
-   "failed to read file: {err}"
-   // 建议
-   "failed to read file '{path}': {err} (permission denied or file not found)"
-   ```
-
-2. **统一超时配置**:
-   - 当前各工具有硬编码超时
-   - 建议通过 `ToolsConfig` 统一配置
-
-3. **缓存优化**:
-   - `read_file` 可添加内容缓存
-   - `list_dir` 可添加目录结构缓存
-
-#### 中期改进
-
-1. **流式输出**:
-   - 大文件读取支持流式返回
-   - 长时间命令执行支持增量输出
-
-2. **并行执行**:
-   - 独立的文件操作可并行化
-   - 批量作业可优化调度算法
-
-3. **工具组合**:
-   - 支持原子性多工具调用
-   - 事务性回滚机制
-
-#### 长期改进
-
-1. **智能权限推断**:
-   - 基于命令模式自动推断所需权限
-   - 减少用户审批打断
-
-2. **自适应沙箱**:
-   - 根据命令特征动态选择沙箱级别
-   - 学习用户习惯优化策略
-
-3. **工具市场**:
-   - 标准化动态工具接口
-   - 支持第三方工具注册
-
-### 6.4 测试覆盖
-
-当前测试覆盖情况:
-- ✅ 单元测试覆盖各处理器基本逻辑
-- ✅ 参数解析测试
-- ✅ 错误处理测试
-
-建议增加:
-- ⬜ 集成测试（完整调用链）
-- ⬜ 并发安全测试
-- ⬜ 性能基准测试
-- ⬜ 模糊测试（参数边界）
+| 处理器 | 测试文件 |
+|--------|----------|
+| apply_patch | `apply_patch_tests.rs` |
+| shell | `shell_tests.rs` |
+| unified_exec | `unified_exec_tests.rs` |
+| read_file | `read_file_tests.rs` |
+| list_dir | `list_dir_tests.rs` |
+| grep_files | `grep_files_tests.rs` |
+| js_repl | `js_repl_tests.rs` |
+| mcp_resource | `mcp_resource_tests.rs` |
+| multi_agents | `multi_agents_tests.rs` |
+| request_user_input | `request_user_input_tests.rs` |
+| tool_search | `tool_search_tests.rs` |
+| tool_suggest | `tool_suggest_tests.rs` |
+| artifacts | `artifacts_tests.rs` |
 
 ---
 
-## 7. 总结
-
-`codex-rs/core/src/tools/handlers` 是 Codex 系统的核心执行层，实现了 20+ 种 LLM 工具的具体逻辑。其设计特点包括:
-
-1. **统一的 Handler trait**: 所有工具实现 `ToolHandler`，便于扩展
-2. **分层权限控制**: 沙箱权限 + 额外权限 + 用户审批
-3. **完整的事件系统**: 支持客户端实时了解执行状态
-4. **灵活的输出格式**: 支持标准响应和 Code Mode 结果
-
-该模块与 `registry`、`orchestrator`、`sandboxing` 等模块紧密协作，构成了 Codex 的工具执行基础设施。
+*Generated: 2026-03-21*
+*Research Scope: codex-rs/core/src/tools/handlers/*
