@@ -1,379 +1,407 @@
-# DIR Research: codex-rs/core/src/memories
+# Research: codex-rs/core/src/memories
 
 ## 场景与职责
 
-`codex-rs/core/src/memories` 是 Codex 智能体的**记忆子系统**，负责实现跨会话的长期记忆功能。该模块通过两阶段流水线（Phase 1 + Phase 2）自动从历史会话（rollouts）中提取、整理和固化有价值的记忆，帮助未来的智能体：
+`codex-rs/core/src/memories` 是 Codex CLI 的**记忆系统（Memory System）**核心实现，负责在会话启动时自动提取和整合历史会话记忆，帮助未来的 Agent 更好地理解用户偏好、复用已验证的工作流程、避免已知问题。
 
-- 深入理解用户偏好，减少重复指令
-- 复用已验证的工作流程和检查清单
-- 避免已知的陷阱和失败模式
-- 提高解决类似任务的效率
+### 核心职责
 
-**触发条件**：当根会话启动时，如果满足以下条件则自动触发：
-- 会话非临时性（非 ephemeral）
-- MemoryTool 功能已启用
-- 不是子代理会话
-- State DB 可用
+1. **启动时记忆管道（Startup Memory Pipeline）**：在根会话启动时异步运行，从 State DB 中提取符合条件的 rollouts 进行处理
+2. **两阶段记忆处理**：
+   - Phase 1（Rollout 提取）：并行提取多个 rollouts 的结构化记忆
+   - Phase 2（全局整合）：串行整合记忆到文件系统产物
+3. **记忆产物管理**：维护 `~/.codex/memories/` 目录下的文件结构
+4. **记忆引用跟踪**：处理 Agent 对记忆文件的引用和引用计数
+
+### 触发条件
+
+记忆管道仅在以下情况触发：
+- 会话不是临时的（`!config.ephemeral`）
+- MemoryTool 功能已启用（`config.features.enabled(Feature::MemoryTool)`）
+- 不是子 Agent 会话（`!matches(source, SessionSource::SubAgent(_))`）
+- State DB 可用（`session.services.state_db.is_some()`）
 
 ## 功能点目的
 
-### 1. Phase 1: Rollout 提取（每线程）
+### 1. Phase 1: Rollout 提取（`phase1.rs`）
 
-**目的**：从最近的合格 rollouts 中提取结构化记忆。
+**目的**：从历史 rollouts 中提取结构化的原始记忆（raw memories）和 rollout 摘要。
 
-**合格 rollout 的筛选条件**：
-- 来自允许的交互式会话源（INTERACTIVE_SESSION_SOURCES）
-- 在配置的年龄窗口内（max_rollout_age_days，默认30天）
-- 已空闲足够时间（min_rollout_idle_hours，默认6小时）
-- 未被其他正在运行的 Phase 1 worker 占用
-- 在启动扫描/声明限制范围内（max_rollouts_per_startup，默认16个）
+**关键流程**：
+1. **声明启动任务**：从 State DB 声明符合条件的 rollout 任务（`claim_stage1_jobs_for_startup`）
+2. **过滤 rollout 内容**：只保留与记忆相关的响应项，过滤掉开发者消息和内存排除的上下文片段
+3. **LLM 提取**：使用 `gpt-5.1-codex-mini` 模型并行处理 rollouts，生成：
+   - `raw_memory`: 详细的 Markdown 格式原始记忆
+   - `rollout_summary`: 紧凑的摘要行
+   - `rollout_slug`: 可选的文件名 slug
+4. **敏感信息脱敏**：使用 `codex_secrets::redact_secrets` 自动脱敏 secrets
+5. **结果存储**：将成功提取的记忆存储到 State DB 的 `stage1_outputs` 表
 
-**输出**：
-- `raw_memory`: 详细的原始记忆（Markdown格式）
-- `rollout_summary`: 紧凑的摘要行，用于路由和索引
-- `rollout_slug`: 可选的短标识符，用于文件名生成
+**任务结果类型**：
+- `SucceededWithOutput`: 成功生成记忆
+- `SucceededNoOutput`: 成功运行但无有效输出
+- `Failed`: 失败（带重试退避）
 
-### 2. Phase 2: 全局整合（Consolidation）
+### 2. Phase 2: 全局整合（`phase2.rs`）
 
-**目的**：将 Stage 1 的输出整合到文件系统记忆产物中，并运行专门的整合代理。
+**目的**：将 Stage-1 输出整合到文件系统记忆产物，并运行专门的整合 Agent。
 
-**产物**：
-- `raw_memories.md`: 合并的原始记忆（最新优先）
-- `rollout_summaries/`: 每个保留 rollout 的摘要文件
-- `MEMORY.md`: 可检索的记忆手册
-- `memory_summary.md`: 用户画像和偏好摘要
-- `skills/`: 可复用的技能包
+**关键流程**：
+1. **声明全局任务**：获取全局 Phase-2 任务锁（确保只有一个整合任务运行）
+2. **查询记忆输入**：从 State DB 获取 Phase-2 输入选择（包含当前选择、之前选择、保留/新增/移除的 diff）
+3. **同步文件系统产物**：
+   - `rollout_summaries/`: 每个保留 rollout 的摘要文件
+   - `raw_memories.md`: 合并的原始记忆文件
+4. **清理过期产物**：删除不再保留的 rollout 摘要文件
+5. **生成整合提示**：构建包含输入 diff 的 consolidation prompt
+6. **启动整合 Agent**：作为内部子 Agent 运行（无审批、无网络、仅本地写入）
+7. **监控 Agent 状态**：心跳维护任务租约，直到 Agent 完成
 
-### 3. 记忆使用追踪
+**Agent 配置**：
+- 模型：`gpt-5.3-codex`
+- 审批策略：`AskForApproval::Never`
+- 沙盒策略：`WorkspaceWrite`（仅 codex_home 可写）
+- 禁用功能：`SpawnCsv`, `Collab`, `MemoryTool`（防止递归）
 
-**目的**：追踪记忆的使用情况，用于：
-- 记录 `usage_count` 和 `last_usage` 时间戳
-- 支持基于使用频率的 Phase 2 选择排序
-- 清理长期未使用的记忆（max_unused_days，默认30天）
+### 3. 存储管理（`storage.rs`）
+
+**目的**：管理记忆文件系统产物的读写和清理。
+
+**核心功能**：
+- `rebuild_raw_memories_file_from_memories`: 从 DB 记忆重建 `raw_memories.md`
+- `sync_rollout_summaries_from_memories`: 同步 rollout 摘要文件
+- `rollout_summary_file_stem`: 生成规范的文件名（格式：`{timestamp}-{short_hash}[-{slug}]`）
+
+**文件名生成规则**：
+- 时间戳：从 UUID v7 提取或回退到 `source_updated_at`
+- 短哈希：UUID 后 4 位或 thread_id 的哈希
+- Slug：清理后的 rollout_slug（最多 60 字符，小写+数字+下划线）
+
+### 4. 提示模板（`prompts.rs`）
+
+**目的**：使用 Askama 模板引擎构建 LLM 提示。
+
+**模板文件**（位于 `codex-rs/core/templates/memories/`）：
+- `stage_one_system.md`: Phase 1 系统提示（569 行详细指令）
+- `stage_one_input.md`: Phase 1 用户输入模板
+- `consolidation.md`: Phase 2 整合提示（835 行详细指令）
+- `read_path.md`: Memory Tool 开发者指令模板
+
+### 5. 引用跟踪（`citations.rs`）
+
+**目的**：解析 Agent 对记忆文件的引用。
+
+**解析格式**：
+```xml
+<oai-mem-citation>
+<citation_entries>
+MEMORY.md:234-236|note=[...]
+rollout_summaries/2026-02-17T21-23-02-LN3m-weekly_memory_report.md:10-12|note=[...]
+</citation_entries>
+<rollout_ids>
+019c6e27-e55b-73d1-87d8-4e01f1f75043
+</rollout_ids>
+</oai-mem-citation>
+```
+
+### 6. 使用统计（`usage.rs`）
+
+**目的**：跟踪记忆文件被工具读取的使用情况。
+
+**监控的文件类型**：
+- `MEMORY.md`
+- `memory_summary.md`
+- `raw_memories.md`
+- `rollout_summaries/`
+- `skills/`
+
+### 7. 控制操作（`control.rs`）
+
+**目的**：提供记忆目录的清理功能。
+
+**安全特性**：
+- 拒绝清理符号链接目录（防止误删外部目录）
+- 保留根目录本身，只清理内容
 
 ## 具体技术实现
 
-### 关键流程
-
-#### Phase 1 流程 (`phase1.rs`)
-
-```
-1. claim_startup_jobs() - 从 State DB 声明启动任务
-   - 查询符合条件的线程
-   - 使用 lease 机制防止重复处理
-   
-2. build_request_context() - 构建请求上下文
-   - 使用 gpt-5.1-codex-mini 模型（可配置）
-   - Low reasoning effort
-   
-3. run_jobs() - 并行运行提取任务（并发限制：8）
-   - 加载 rollout 内容
-   - 过滤记忆相关的响应项
-   - 调用模型提取记忆
-   - 使用 JSON schema 约束输出
-   - 敏感信息脱敏（redact_secrets）
-   
-4. 标记任务结果
-   - succeeded: 成功提取记忆
-   - succeeded_no_output: 有效运行但无有用输出
-   - failed: 失败，进入重试退避
-```
-
-#### Phase 2 流程 (`phase2.rs`)
-
-```
-1. job::claim() - 声明全局 Phase 2 任务
-   - 单例锁确保只有一个整合任务运行
-   - 检查 watermark 确定是否需要运行
-   
-2. agent::get_config() - 构建子代理配置
-   - 禁用 Collab 和 MemoryTool（防止递归）
-   - 设置 WorkspaceWrite 沙箱策略（仅 codex_home 可写）
-   - 使用 gpt-5.3-codex 模型（可配置）
-   
-3. db.get_phase2_input_selection() - 获取输入选择
-   - 按 usage_count 和 last_usage 排序
-   - 计算 added/retained/removed 差异
-   
-4. sync_rollout_summaries_from_memories() - 同步产物
-   - 重建 raw_memories.md
-   - 更新 rollout_summaries/ 目录
-   - 清理过时的产物
-   
-5. agent::spawn() - 启动整合子代理
-   - 注入 consolidation.md 提示词
-   - 监控代理状态
-   - 定期心跳保活任务租约
-   
-6. job::succeed/failed() - 标记任务完成
-   - 更新 watermark
-   - 记录选中的 stage1 输出
-```
-
 ### 关键数据结构
 
-#### Stage1Output (`codex-state/src/model/memories.rs`)
-
 ```rust
-pub struct Stage1Output {
-    pub thread_id: ThreadId,
-    pub rollout_path: PathBuf,
-    pub source_updated_at: DateTime<Utc>,
-    pub raw_memory: String,
-    pub rollout_summary: String,
-    pub rollout_slug: Option<String>,
-    pub cwd: PathBuf,
-    pub git_branch: Option<String>,
-    pub generated_at: DateTime<Utc>,
+// Phase 1 模型输出（位于 phase1.rs）
+struct StageOneOutput {
+    raw_memory: String,
+    rollout_summary: String,
+    rollout_slug: Option<String>,
+}
+
+// Phase 1 请求上下文
+struct RequestContext {
+    model_info: ModelInfo,
+    session_telemetry: SessionTelemetry,
+    reasoning_effort: Option<ReasoningEffortConfig>,
+    reasoning_summary: ReasoningSummaryConfig,
+    service_tier: Option<ServiceTier>,
+    turn_metadata_header: Option<String>,
+}
+
+// Phase 2 声明结果
+struct Claim {
+    token: String,
+    watermark: i64,
+}
+
+// 统计计数器
+struct Counters {
+    input: i64,
 }
 ```
 
-#### Phase2InputSelection
+### 配置常量（位于 `mod.rs`）
 
 ```rust
-pub struct Phase2InputSelection {
-    pub selected: Vec<Stage1Output>,      // 当前选中的记忆
-    pub previous_selected: Vec<Stage1Output>, // 上次选中的记忆
-    pub retained_thread_ids: Vec<ThreadId>,   // 保留的线程ID
-    pub removed: Vec<Stage1OutputRef>,    // 移除的记忆引用
+mod phase_one {
+    const MODEL: &str = "gpt-5.1-codex-mini";
+    const REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
+    const CONCURRENCY_LIMIT: usize = 8;
+    const DEFAULT_STAGE_ONE_ROLLOUT_TOKEN_LIMIT: usize = 150_000;
+    const CONTEXT_WINDOW_PERCENT: i64 = 70;
+    const JOB_LEASE_SECONDS: i64 = 3_600;
+    const JOB_RETRY_DELAY_SECONDS: i64 = 3_600;
+    const THREAD_SCAN_LIMIT: usize = 5_000;
+    const PRUNE_BATCH_SIZE: usize = 200;
+}
+
+mod phase_two {
+    const MODEL: &str = "gpt-5.3-codex";
+    const REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Medium;
+    const JOB_LEASE_SECONDS: i64 = 3_600;
+    const JOB_RETRY_DELAY_SECONDS: i64 = 3_600;
+    const JOB_HEARTBEAT_SECONDS: u64 = 90;
 }
 ```
 
-#### 配置项 (`config/types.rs`)
+### State DB 交互（位于 `codex-rs/state/src/runtime/memories.rs`）
 
-```rust
-pub struct MemoriesConfig {
-    pub no_memories_if_mcp_or_web_search: bool,
-    pub generate_memories: bool,          // 是否生成记忆
-    pub use_memories: bool,               // 是否使用记忆
-    pub max_raw_memories_for_consolidation: usize, // 默认256
-    pub max_unused_days: i64,             // 默认30天
-    pub max_rollouts_per_startup: usize,  // 默认16
-    pub max_rollout_age_days: i64,        // 默认30天
-    pub min_rollout_idle_hours: i64,      // 默认6小时
-    pub extract_model: Option<String>,    // Phase 1 模型
-    pub consolidation_model: Option<String>, // Phase 2 模型
-}
-```
+**核心方法**：
+- `claim_stage1_jobs_for_startup`: 声明 Stage-1 启动任务
+- `try_claim_stage1_job`: 尝试声明单个 Stage-1 任务
+- `mark_stage1_job_succeeded`: 标记 Stage-1 任务成功并存储输出
+- `mark_stage1_job_succeeded_no_output`: 标记成功但无输出
+- `mark_stage1_job_failed`: 标记 Stage-1 任务失败并设置重试
+- `try_claim_global_phase2_job`: 声明全局 Phase-2 任务
+- `mark_global_phase2_job_succeeded`: 标记 Phase-2 成功并更新基线
+- `mark_global_phase2_job_failed`: 标记 Phase-2 失败
+- `heartbeat_global_phase2_job`: 心跳维护 Phase-2 租约
+- `get_phase2_input_selection`: 获取 Phase-2 输入选择（含 diff）
+- `prune_stage1_outputs_for_retention`: 清理过期 Stage-1 输出
+- `record_stage1_output_usage`: 记录记忆使用
 
-### 数据库表结构 (`codex-state/src/runtime/memories.rs`)
-
-#### stage1_outputs 表
-
-```sql
-CREATE TABLE stage1_outputs (
-    thread_id TEXT PRIMARY KEY,
-    source_updated_at INTEGER,
-    raw_memory TEXT,
-    rollout_summary TEXT,
-    rollout_slug TEXT,
-    generated_at INTEGER,
-    usage_count INTEGER DEFAULT 0,
-    last_usage INTEGER,
-    selected_for_phase2 INTEGER DEFAULT 0,
-    selected_for_phase2_source_updated_at INTEGER
-);
-```
-
-#### jobs 表（用于任务调度）
-
-```sql
--- memory_stage1: Phase 1 任务
--- memory_consolidate_global: Phase 2 全局整合任务
-
-字段：kind, job_key, status, worker_id, ownership_token,
-      started_at, finished_at, lease_until, retry_at,
-      retry_remaining, last_error, input_watermark, last_success_watermark
-```
-
-### 提示词模板
-
-#### Phase 1 系统提示 (`templates/memories/stage_one_system.md`)
-
-- **核心任务**：将原始 agent rollouts 转换为有用的原始记忆和 rollout 摘要
-- **最小信号门控**：如果无有价值内容，返回空字段
-- **高信号记忆类型**：
-  1. 稳定的用户操作偏好
-  2. 高杠杆程序知识
-  3. 可靠的决策触发器
-  4. 关于用户环境和工作流程的持久证据
-- **任务结果分类**：success/partial/uncertain/fail
-- **输出格式**：JSON 对象，包含 rollout_summary、rollout_slug、raw_memory
-
-#### Phase 2 整合提示 (`templates/memories/consolidation.md`)
-
-- **两种模式**：
-  - INIT：首次构建 Phase 2 产物
-  - INCREMENTAL UPDATE：将新记忆整合到现有产物
-- **产物格式**：
-  - MEMORY.md：可检索的记忆手册
-  - memory_summary.md：用户画像和偏好
-  - skills/：可复用技能包
-- **增量更新机制**：
-  - 使用 diff 识别 added/retained/removed threads
-  - 仅删除由 removed threads 支持的内存
-  - 保留未删除 threads 的内容
-
-#### 记忆工具开发者指令 (`templates/memories/read_path.md`)
-
-- 指导 Agent 如何使用记忆文件夹
-- 快速记忆通道：4-6 步搜索限制
-- 引用格式要求：`<oai-mem-citation>` 块
-
-## 关键代码路径与文件引用
-
-### 核心模块文件
-
-| 文件 | 职责 |
-|------|------|
-| `mod.rs` | 模块入口，定义常量、路径函数、指标名称 |
-| `start.rs` | 启动任务入口 `start_memories_startup_task()` |
-| `phase1.rs` | Phase 1 提取逻辑，包含 job 处理和结果标记 |
-| `phase2.rs` | Phase 2 整合逻辑，包含子代理管理和产物同步 |
-| `storage.rs` | 文件系统操作：raw_memories.md、rollout_summaries/ 管理 |
-| `prompts.rs` | 提示词构建：consolidation、stage_one_input、memory_tool 指令 |
-| `citations.rs` | 记忆引用解析：`<citation_entries>` 和 `<rollout_ids>` |
-| `usage.rs` | 记忆使用指标追踪 |
-| `control.rs` | 内存根目录清理工具 |
-| `README.md` | 模块架构文档 |
-
-### 测试文件
-
-| 文件 | 测试内容 |
-|------|----------|
-| `tests.rs` | 集成测试：存储同步、Phase 2 调度、watermark 逻辑 |
-| `phase1_tests.rs` | Phase 1 单元测试：序列化、统计聚合 |
-| `storage_tests.rs` | 存储单元测试：文件名生成逻辑 |
-| `prompts_tests.rs` | 提示词单元测试：输入消息截断 |
-| `citations_tests.rs` | 引用解析单元测试 |
-
-### 模板文件
-
-| 文件 | 用途 |
-|------|------|
-| `templates/memories/stage_one_system.md` | Phase 1 系统提示 |
-| `templates/memories/stage_one_input.md` | Phase 1 用户输入模板 |
-| `templates/memories/consolidation.md` | Phase 2 整合提示 |
-| `templates/memories/read_path.md` | 记忆工具开发者指令 |
-
-### 调用入口
-
-```rust
-// codex.rs:1980
-codex-rs/core/src/codex.rs:1980
-memories::start_memories_startup_task(&sess, Arc::clone(&config), &session_source);
-
-// 条件检查：非 ephemeral、MemoryTool 启用、非子代理、State DB 可用
-```
-
-### State DB 接口 (`codex-state/src/runtime/memories.rs`)
-
-| 方法 | 用途 |
-|------|------|
-| `claim_stage1_jobs_for_startup()` | 声明 Phase 1 启动任务 |
-| `try_claim_stage1_job()` | 尝试声明单个 Stage 1 任务 |
-| `mark_stage1_job_succeeded()` | 标记 Stage 1 成功并存储输出 |
-| `mark_stage1_job_succeeded_no_output()` | 标记 Stage 1 成功但无输出 |
-| `mark_stage1_job_failed()` | 标记 Stage 1 失败并设置重试 |
-| `try_claim_global_phase2_job()` | 声明全局 Phase 2 任务 |
-| `mark_global_phase2_job_succeeded()` | 标记 Phase 2 成功 |
-| `mark_global_phase2_job_failed()` | 标记 Phase 2 失败 |
-| `get_phase2_input_selection()` | 获取 Phase 2 输入选择（含 diff） |
-| `record_stage1_output_usage()` | 记录记忆使用 |
-| `prune_stage1_outputs_for_retention()` | 清理过期记忆 |
-| `clear_memory_data()` | 清除所有记忆数据 |
-
-## 依赖与外部交互
-
-### 内部依赖
-
-| 模块 | 用途 |
-|------|------|
-| `codex-state` | SQLite 数据库操作，任务调度，Stage1Output/Phase2InputSelection 类型 |
-| `codex-protocol` | ThreadId、SessionSource、TokenUsage、ResponseItem 等类型 |
-| `codex-otel` | SessionTelemetry，指标收集（counter/histogram/timer） |
-| `crate::codex::Session` | 会话上下文，模型客户端访问 |
-| `crate::config::Config` | 配置读取 |
-| `crate::features::Feature` | MemoryTool 功能开关检查 |
-| `crate::rollout::RolloutRecorder` | Rollout 内容加载 |
-| `crate::agent::AgentControl` | 子代理生命周期管理 |
-| `crate::truncate` | 文本截断（按 token 限制） |
-| `codex-secrets` | 敏感信息脱敏 (`redact_secrets`) |
-
-### 外部产物
+### 文件系统产物结构
 
 ```
 ~/.codex/memories/
-├── raw_memories.md              # 合并的原始记忆
-├── MEMORY.md                    # 记忆手册
-├── memory_summary.md            # 用户画像摘要
-├── rollout_summaries/           # 每 rollout 摘要
-│   ├── 2025-02-11T15-35-19-jqmb.md
-│   └── ...
-└── skills/                      # 技能包
-    └── <skill-name>/
+├── raw_memories.md          # 合并的原始记忆（Phase 2 输入）
+├── MEMORY.md                # 整合后的记忆手册（Phase 2 输出）
+├── memory_summary.md        # 记忆摘要（加载到系统提示）
+├── rollout_summaries/       # 每个 rollout 的摘要文件
+│   ├── 2026-03-20T10-30-00-a1b2-foo_task.md
+│   └── 2026-03-19T15-45-00-c3d4-bar_task.md
+└── skills/                  # 可复用技能包
+    └── skill-name/
         ├── SKILL.md
         ├── scripts/
         ├── templates/
         └── examples/
 ```
 
-### 指标
+### 入口点
 
-| 指标名称 | 类型 | 描述 |
-|----------|------|------|
-| `codex.memory.phase1` | Counter | Phase 1 任务数（按状态分组） |
-| `codex.memory.phase1.e2e_ms` | Timer | Phase 1 端到端延迟 |
-| `codex.memory.phase1.output` | Counter | Phase 1 原始记忆输出数 |
-| `codex.memory.phase1.token_usage` | Histogram | Phase 1 Token 使用分布 |
-| `codex.memory.phase2` | Counter | Phase 2 任务数（按状态分组） |
-| `codex.memory.phase2.e2e_ms` | Timer | Phase 2 端到端延迟 |
-| `codex.memory.phase2.input` | Counter | Phase 2 输入记忆数 |
-| `codex.memory.phase2.token_usage` | Histogram | Phase 2 Token 使用分布 |
-| `codex.memories.usage` | Counter | 记忆文件使用次数（按类型） |
+**启动任务**（`start.rs`）：
+```rust
+pub(crate) fn start_memories_startup_task(
+    session: &Arc<Session>,
+    config: Arc<Config>,
+    source: &SessionSource,
+)
+```
+
+**调用位置**（`codex.rs`）：
+1. 会话创建时（`Session::new` 后，第 1980 行）
+2. 手动更新记忆时（`update_memories` 方法，第 4917 行）
+
+**清理记忆**（`codex.rs` 第 4879-4880 行）：
+```rust
+let memory_root = crate::memories::memory_root(&config.codex_home);
+crate::memories::clear_memory_root_contents(&memory_root).await;
+```
+
+## 关键代码路径与文件引用
+
+### 核心文件
+
+| 文件 | 职责 | 行数 |
+|------|------|------|
+| `mod.rs` | 模块入口、常量定义、路径函数 | 115 |
+| `start.rs` | 启动任务入口 | 44 |
+| `phase1.rs` | Phase 1 提取逻辑 | 619 |
+| `phase2.rs` | Phase 2 整合逻辑 | 498 |
+| `storage.rs` | 文件系统存储管理 | 260 |
+| `prompts.rs` | 提示模板构建 | 183 |
+| `citations.rs` | 引用解析 | 89 |
+| `usage.rs` | 使用统计 | 129 |
+| `control.rs` | 清理控制 | 33 |
+| `tests.rs` | 集成测试 | 920 |
+
+### 模板文件
+
+| 文件 | 用途 | 行数 |
+|------|------|------|
+| `templates/memories/stage_one_system.md` | Phase 1 系统提示 | 569 |
+| `templates/memories/stage_one_input.md` | Phase 1 输入模板 | 11 |
+| `templates/memories/consolidation.md` | Phase 2 整合提示 | 835 |
+| `templates/memories/read_path.md` | Memory Tool 开发者指令 | 129 |
+
+### 外部依赖
+
+| 模块 | 用途 |
+|------|------|
+| `codex_state::runtime::memories` | State DB 记忆操作 |
+| `codex_protocol::memory_citation` | 记忆引用类型 |
+| `codex_secrets::redact_secrets` | 敏感信息脱敏 |
+| `askama::Template` | 提示模板渲染 |
+
+## 依赖与外部交互
+
+### 上游依赖（调用方）
+
+1. **`codex.rs`**：
+   - `Session::new` 后启动记忆管道
+   - `drop_memories` 命令清理记忆
+   - `update_memories` 命令手动触发更新
+   - `build_memory_tool_developer_instructions` 构建开发者指令
+
+2. **`stream_events_utils.rs`**：
+   - 使用 `parse_memory_citation` 解析记忆引用
+   - 使用 `get_thread_id_from_citations` 提取 thread IDs
+
+3. **`tools/registry.rs`**：
+   - 调用 `emit_metric_for_tool_read` 记录记忆文件读取
+
+### 下游依赖（被调用方）
+
+1. **`codex_state`**：
+   - `StateRuntime` 提供记忆相关的数据库操作
+   - `Stage1Output`, `Phase2InputSelection` 等数据类型
+
+2. **`codex_protocol`**：
+   - `ThreadId`, `SessionSource`, `SubAgentSource`
+   - `MemoryCitation`, `MemoryCitationEntry`
+
+3. **`codex_secrets`**：
+   - `redact_secrets` 函数用于脱敏
+
+4. **内部模块**：
+   - `RolloutRecorder::load_rollout_items` 加载 rollout
+   - `AgentControl::spawn_agent` 启动整合 Agent
+   - `SessionTelemetry` 记录指标
+
+### 配置依赖
+
+**`MemoriesConfig`**（`config/types.rs` 第 424-436 行）：
+```rust
+pub struct MemoriesConfig {
+    pub no_memories_if_mcp_or_web_search: bool,
+    pub generate_memories: bool,
+    pub use_memories: bool,
+    pub max_raw_memories_for_consolidation: usize,  // 默认 256
+    pub max_unused_days: i64,                       // 默认 30
+    pub max_rollout_age_days: i64,                  // 默认 30
+    pub max_rollouts_per_startup: usize,            // 默认 16
+    pub min_rollout_idle_hours: i64,                // 默认 6
+    pub extract_model: Option<String>,
+    pub consolidation_model: Option<String>,
+}
+```
+
+**Feature Flag**：`Feature::MemoryTool`（`features.rs` 第 136 行）
+- 阶段：`UnderDevelopment`
+- 默认：禁用
+- 键名：`"memories"`
 
 ## 风险、边界与改进建议
 
 ### 已知风险
 
-1. **递归风险**：Phase 2 子代理禁用了 Collab 和 MemoryTool，防止无限递归
-2. **数据竞争**：Phase 1 使用 lease 机制（1小时）防止并发冲突；Phase 2 使用全局单例锁
-3. **敏感信息泄露**：Phase 1 使用 `redact_secrets` 脱敏，但依赖模型正确识别敏感信息
-4. **存储膨胀**：长期运行可能导致 memories 目录膨胀；有 `max_unused_days` 和 `max_raw_memories_for_consolidation` 限制
-5. **任务失败**：失败任务进入退避重试（1小时），最多3次重试
+1. **并发竞争**：
+   - Phase 1 使用 `buffer_unordered(CONCURRENCY_LIMIT)` 并行处理，但依赖 State DB 的租约机制防止重复处理
+   - Phase 2 使用全局任务锁确保单实例运行，但存在小概率的 race condition（代码注释 TODO）
 
-### 边界条件
+2. **资源消耗**：
+   - Phase 1 可能同时处理最多 8 个 rollouts，每个 rollout 可能包含大量 token
+   - Phase 2 启动的整合 Agent 会消耗额外的 LLM tokens
 
-1. **空记忆处理**：当无输入时，Phase 2 仍会清理过时产物并标记成功
-2. **Symlink 安全**：`clear_memory_root_contents()` 拒绝处理 symlink 目录，防止误删
-3. **模型不可用**：Phase 1/2 模型配置可回退到默认模型
-4. **上下文限制**：Phase 1 rollout 内容截断至模型上下文窗口的 70% 的 70%
-5. **线程扫描限制**：最多扫描 5000 个线程，声明限制为 max_rollouts_per_startup（默认16）
+3. **数据一致性**：
+   - 文件系统产物和 State DB 之间可能存在不一致（如进程崩溃后）
+   - `raw_memories.md` 和 `rollout_summaries/` 是冗余存储，需要同步维护
+
+4. **隐私泄露风险**：
+   - 虽然使用 `redact_secrets` 脱敏，但无法保证 100% 覆盖所有敏感模式
+   - rollouts 可能包含用户敏感信息，需要谨慎处理
+
+### 边界情况
+
+1. **空记忆处理**：
+   - 当没有符合条件的 rollouts 时，Phase 1 跳过，Phase 2 清理现有产物
+   - 当所有记忆都被移除时，清理 `MEMORY.md`, `memory_summary.md`, `skills/` 目录
+
+2. **符号链接安全**：
+   - `clear_memory_root_contents` 明确拒绝清理符号链接目录，防止误删
+
+3. **重试机制**：
+   - Stage-1 和 Phase-2 都有重试机制（默认 3 次），但需要手动触发或等待下次启动
+
+4. **租约过期**：
+   - 任务租约默认 1 小时，过期后可被其他 worker 抢占
+   - Phase-2 有心跳机制（90 秒间隔）维护租约
 
 ### 改进建议
 
 1. **可观测性**：
-   - 添加记忆质量评估指标（如用户反馈相关性）
-   - 添加 Phase 2 产物大小监控
+   - 当前指标主要关注任务数量和 token 使用，建议增加：
+     - 记忆质量评分（用户反馈循环）
+     - 记忆命中率（实际被引用的比例）
+     - 整合 Agent 产出的文件变更统计
 
 2. **性能优化**：
-   - Phase 1 当前顺序处理 rollout 加载，可考虑预取
-   - Phase 2 子代理的超时处理可更细粒度
+   - Phase 1 的 rollout 过滤可以在加载前进行更激进的裁剪
+   - 考虑增量更新 `raw_memories.md` 而非全量重建
 
-3. **功能增强**：
-   - 支持记忆的手动标记（重要/无用）
-   - 支持跨设备的记忆同步
+3. **可靠性**：
+   - 添加文件系统产物和 DB 状态的一致性检查机制
+   - 考虑添加记忆备份/恢复功能
+
+4. **功能扩展**：
+   - 支持用户手动标记重要记忆（提升优先级）
    - 支持记忆的版本控制和回滚
+   - 支持跨设备的记忆同步
 
-4. **安全加固**：
-   - 增加敏感信息检测的覆盖率测试
-   - 考虑对记忆文件进行加密存储
+5. **安全加固**：
+   - 增强 secret 检测模式，覆盖更多类型的敏感信息
+   - 添加记忆内容的加密存储选项
 
-5. **配置灵活性**：
-   - 支持按项目/目录的记忆隔离
-   - 支持更细粒度的记忆保留策略
+### 测试覆盖
 
----
+测试文件 `tests.rs` 包含 920 行测试代码，覆盖：
+- 路径函数测试
+- JSON Schema 验证
+- 清理操作测试（包括符号链接拒绝）
+- 文件同步测试
+- 文件名生成测试
+- Phase 2 水印逻辑测试
+- Phase 2 任务调度测试（跳过、重试、失败处理）
 
-*研究文档生成时间：2026-03-21*
-*基于代码版本：codex-rs/core/src/memories/*
+建议补充：
+- Phase 1 的 LLM 调用 mock 测试
+- 整合 Agent 的端到端测试
+- 并发竞争场景的压力测试
