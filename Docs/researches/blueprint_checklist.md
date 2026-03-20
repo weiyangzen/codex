@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-20 09:16:01 +0800
+Generated at: 2026-03-20 09:21:02 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -114,7 +114,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/011_add_overwrites_existing_file
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/011_add_overwrites_existing_file/expected
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/011_add_overwrites_existing_file/input
-- [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails
+- [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails/expected
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails/expected/dir
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails/input
