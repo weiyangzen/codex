@@ -1,443 +1,441 @@
-# DIR codex-rs/core/src/config 研究文档
+# codex-rs/core/src/config 目录研究文档
 
-## 场景与职责
+## 1. 场景与职责
 
-`codex-rs/core/src/config` 是 Codex CLI 项目的**核心配置管理模块**，负责处理所有与配置相关的功能。该模块是 Codex 运行时配置的单一事实来源（Single Source of Truth），管理从磁盘加载、合并多层配置、验证到运行时生效的完整生命周期。
+`codex-rs/core/src/config` 目录是 Codex CLI 项目的**核心配置管理模块**，负责整个应用程序的配置加载、解析、验证、编辑和持久化。该模块是 Codex 运行时的配置中枢，支持多层级配置合并、配置文件编辑、权限沙箱配置等关键功能。
 
-### 主要职责
+### 1.1 核心职责
 
-1. **配置加载与解析**：从 `~/.codex/config.toml` 及项目级 `.codex/config.toml` 加载配置
-2. **多层配置合并**：支持用户配置、项目配置、CLI 覆盖、云需求配置等多层叠加
-3. **配置验证**：确保配置值符合约束条件（如 requirements.toml 中的限制）
-4. **配置持久化**：支持通过编辑操作（ConfigEdit）原子性地修改配置文件
-5. **配置服务**：为 App Server 协议提供配置读写 API
-6. **Schema 生成**：生成 JSON Schema 用于编辑器自动补全和验证
+- **配置加载与解析**：从多个配置源（系统、用户、项目、CLI 覆盖）加载并合并配置
+- **配置验证**：验证配置值的合法性，包括模型提供商、功能开关、权限配置等
+- **配置编辑与持久化**：提供类型安全的配置编辑 API，支持原子写入
+- **多层级配置管理**：支持配置分层（system → user → project → runtime），实现配置继承与覆盖
+- **权限与沙箱配置**：管理文件系统和网络沙箱策略
+- **Agent 角色管理**：加载和验证用户定义的 Agent 角色配置
+- **MCP 服务器配置**：管理 Model Context Protocol 服务器配置
 
-### 使用场景
+### 1.2 使用场景
 
-- **CLI 启动**：`codex` 或 `codex exec` 启动时加载配置
-- **TUI 交互**：用户在 TUI 中修改设置（如切换模型、主题）
-- **App Server**：IDE 扩展通过 App Server 协议读取/写入配置
-- **配置迁移**：自动迁移旧版本配置（如 `smart_approvals` → `guardian_approval`）
-
----
-
-## 功能点目的
-
-### 1. 配置结构定义（types.rs）
-
-定义了配置文件中所有可用的配置项数据结构：
-
-| 配置项 | 用途 |
-|--------|------|
-| `McpServerConfig` | MCP 服务器配置（stdio/HTTP 传输） |
-| `MemoriesToml/MemoriesConfig` | 记忆系统配置（生成、使用、合并参数） |
-| `ShellEnvironmentPolicy` | Shell 执行环境变量继承策略 |
-| `History` | 历史记录持久化设置 |
-| `OtelConfig` | OpenTelemetry 遥测配置 |
-| `SkillsConfig` | Skill 系统配置 |
-| `UriBasedFileOpener` | 文件打开器（VSCode/Cursor 等） |
-| `Notifications` | TUI 通知设置 |
-| `Tui` | TUI 专属配置（主题、动画、状态栏） |
-| `SandboxWorkspaceWrite` | 沙箱工作区写入配置 |
-
-### 2. 主配置结构（mod.rs）
-
-**`Config` 结构体**：运行时配置的核心结构，包含 80+ 个字段，涵盖：
-- 模型配置（model, model_provider, reasoning_effort 等）
-- 权限配置（Permissions 结构体）
-- 沙箱策略（SandboxPolicy）
-- MCP 服务器映射
-- Agent 角色配置
-- 各种功能开关和实验性功能
-
-**`ConfigToml` 结构体**：直接从 TOML 文件反序列化的原始配置，所有字段为 `Option<T>` 以支持部分配置。
-
-**`ConfigOverrides`**：CLI 参数和程序覆盖的配置项。
-
-### 3. 配置 Profile（profile.rs）
-
-支持在 `config.toml` 中定义多个命名配置集（profiles），例如：
-
-```toml
-profile = "fast"
-
-[profiles.fast]
-model = "gpt-5.1-codex"
-approval_policy = "never"
-
-[profiles.strict]
-model = "o4-mini"
-sandbox_mode = "read-only"
-```
-
-`ConfigProfile` 结构体定义了可在 profile 中覆盖的所有配置项。
-
-### 4. 权限配置（permissions.rs）
-
-新一代权限系统，支持细粒度的文件系统和网络权限控制：
-
-```toml
-default_permissions = "workspace"
-
-[permissions.workspace]
-filesystem = { ":minimal" = "read", ":project_roots" = { "." = "write", "docs" = "read" } }
-network = { enabled = true, allowed_domains = ["openai.com"] }
-```
-
-- `PermissionsToml`：权限配置集合
-- `PermissionProfileToml`：单个权限配置文件
-- `FilesystemPermissionsToml`：文件系统权限
-- `NetworkToml`：网络代理和访问控制
-
-### 5. Agent 角色（agent_roles.rs）
-
-支持定义 Agent 角色配置：
-
-```toml
-[agents.researcher]
-description = "Research-focused role."
-config_file = "./agents/researcher.toml"
-nickname_candidates = ["Herodotus", "Ibn Battuta"]
-```
-
-支持从 `config.toml` 内联定义或从 `agents/` 目录自动发现 `.toml` 文件。
-
-### 6. 配置编辑（edit.rs）
-
-提供声明式的配置编辑 API，支持：
-
-- `ConfigEdit` 枚举：定义所有可执行的配置修改操作
-  - `SetModel`：设置模型和推理努力
-  - `SetServiceTier`：设置服务层级
-  - `SetNoticeHideFullAccessWarning`：设置通知标志
-  - `ReplaceMcpServers`：替换整个 MCP 服务器表
-  - `SetSkillConfig`：启用/禁用 skill
-  - `SetProjectTrustLevel`：设置项目信任级别
-  - `SetPath/ClearPath`：通用路径设置/清除
-
-- `ConfigEditsBuilder`：流式构建器模式，支持链式调用
-- `ConfigDocument`：基于 `toml_edit` 的文档操作，保留注释和格式
-
-### 7. 网络代理规范（network_proxy_spec.rs）
-
-管理网络代理配置的规范和启动：
-
-- `NetworkProxySpec`：网络代理配置 + 约束
-- `StartedNetworkProxy`：已启动的代理句柄
-- 集成 `codex_network_proxy` crate 提供网络隔离和访问控制
-
-### 8. 托管特性（managed_features.rs）
-
-管理功能标志（feature flags）的约束和验证：
-
-- `ManagedFeatures`：包装 `Features`，强制执行 `requirements.toml` 中的约束
-- 支持功能依赖关系自动规范化
-- 验证显式功能设置是否符合要求
-
-### 9. 配置服务（service.rs）
-
-为 App Server 协议实现配置读写服务：
-
-- `ConfigService`：配置服务结构体
-- `read()`：读取有效配置和配置层
-- `write_value()/batch_write()`：写入配置值
-- `load_user_saved_config()`：加载用户保存的配置
-- 支持乐观并发控制（版本检查）
-- 支持配置值覆盖检测
-
-### 10. Schema 生成（schema.rs, schema.md）
-
-使用 `schemars` 生成 JSON Schema：
-
-- `config_schema()`：生成 `ConfigToml` 的 JSON Schema
-- `features_schema()`：功能标志的 Schema（限定已知键）
-- `mcp_servers_schema()`：MCP 服务器的 Schema
-- 生成的 Schema 提交到 `codex-rs/core/config.schema.json` 供编辑器使用
+| 场景 | 说明 |
+|------|------|
+| 应用启动 | 通过 `ConfigBuilder` 构建运行时配置 |
+| 配置热更新 | 通过 `ConfigService` 读取和写入配置 |
+| 权限控制 | 配置沙箱模式（ReadOnly/WorkspaceWrite/DangerFullAccess） |
+| Agent 扩展 | 加载自定义 Agent 角色和技能配置 |
+| 企业部署 | 支持 managed_config/requirements.toml 企业策略 |
 
 ---
 
-## 具体技术实现
+## 2. 功能点目的
 
-### 配置加载流程
+### 2.1 配置结构定义 (types.rs, profile.rs)
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Config 加载流程                              │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1. ConfigBuilder::build()                                      │
-│     ├── 查找 codex_home (~/.codex 或 CODEX_HOME)               │
-│     ├── 迁移 smart_approvals → guardian_approval (如需要)      │
-│     └── 解析 cwd（CLI 覆盖或当前目录）                          │
-│                                                                 │
-│  2. load_config_layers_state()                                  │
-│     ├── 加载用户配置 (~/.codex/config.toml)                    │
-│     ├── 加载项目配置 (.codex/config.toml，如存在)              │
-│     ├── 加载 CLI 覆盖 (--flag 值)                              │
-│     ├── 加载云需求 (requirements.toml，如存在)                 │
-│     └── 合并为 ConfigLayerStack                                │
-│                                                                 │
-│  3. 合并 TOML 值                                                │
-│     └── effective_config() → 合并后的 toml::Value              │
-│                                                                 │
-│  4. 反序列化为 ConfigToml                                       │
-│     └── deserialize_config_toml_with_base()                    │
-│                                                                 │
-│  5. Config::load_config_with_layer_stack()                     │
-│     ├── 验证 model_providers（保留 ID 检查）                   │
-│     ├── 应用 requirements.toml 约束                            │
-│     ├── 解析 profile 和特性标志                                │
-│     ├── 计算沙箱策略                                           │
-│     ├── 编译权限配置文件（如使用）                             │
-│     ├── 加载 Agent 角色                                        │
-│     └── 构建最终 Config                                        │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+定义了所有配置项的 TOML 序列化/反序列化结构体：
 
-### 配置编辑流程
+- **`ConfigToml`**：根配置结构，包含所有配置项
+- **`ConfigProfile`**：命名配置 profile，支持多环境配置切换
+- **`McpServerConfig`**：MCP 服务器配置（stdio/HTTP 传输）
+- **`PermissionsToml`**：权限配置文件系统/网络访问控制
+- **`MemoriesToml`**：记忆子系统配置
+- **`OtelConfigToml`**：OpenTelemetry 遥测配置
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Config 编辑流程                               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1. ConfigEditsBuilder::new(codex_home)                         │
-│     ├── 设置 profile（可选）                                    │
-│     └── 添加编辑操作（set_model, replace_mcp_servers 等）      │
-│                                                                 │
-│  2. apply() / apply_blocking()                                  │
-│     ├── 解析现有 config.toml（如存在）                         │
-│     ├── 创建 ConfigDocument（toml_edit::DocumentMut）          │
-│     ├── 应用每个 ConfigEdit                                     │
-│     │   └── 通过 scoped_segments 解析 profile 作用域           │
-│     ├── 保留现有注释和格式（preserve_decor）                   │
-│     └── 原子写入（write_atomically）                           │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+### 2.2 运行时配置 (mod.rs)
 
-### 关键数据结构
+**`Config`** 结构体是运行时配置的核心，包含：
+
+- 模型配置（model, provider, reasoning_effort 等）
+- 权限配置（sandbox_policy, approval_policy 等）
+- 环境配置（cwd, codex_home, paths 等）
+- 功能开关（features, web_search_mode 等）
+- Agent 配置（max_threads, max_depth, roles 等）
+
+**`ConfigBuilder`** 提供流畅的 API 构建配置：
 
 ```rust
-// 运行时配置（mod.rs）
-pub struct Config {
-    pub config_layer_stack: ConfigLayerStack,  // 配置来源追溯
-    pub startup_warnings: Vec<String>,         // 启动警告
-    pub model: Option<String>,                 // 模型选择
-    pub service_tier: Option<ServiceTier>,     // 服务层级
-    pub permissions: Permissions,              // 权限配置
-    pub mcp_servers: Constrained<HashMap<String, McpServerConfig>>,
-    pub agent_roles: BTreeMap<String, AgentRoleConfig>,
-    pub features: ManagedFeatures,             // 功能标志
-    // ... 80+ 字段
-}
+ConfigBuilder::default()
+    .cli_overrides(cli_overrides)
+    .harness_overrides(harness_overrides)
+    .build()
+    .await
+```
 
-// 权限配置（mod.rs）
-pub struct Permissions {
-    pub approval_policy: Constrained<AskForApproval>,
-    pub sandbox_policy: Constrained<SandboxPolicy>,
-    pub file_system_sandbox_policy: FileSystemSandboxPolicy,
-    pub network_sandbox_policy: NetworkSandboxPolicy,
-    pub network: Option<NetworkProxySpec>,
-    pub allow_login_shell: bool,
-    pub shell_environment_policy: ShellEnvironmentPolicy,
-    // ...
-}
+### 2.3 配置编辑 (edit.rs)
 
-// TOML 配置（mod.rs）
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct ConfigToml {
-    pub model: Option<String>,
-    pub approval_policy: Option<AskForApproval>,
-    pub sandbox_mode: Option<SandboxMode>,
-    pub mcp_servers: HashMap<String, McpServerConfig>,
-    pub profiles: HashMap<String, ConfigProfile>,
-    pub permissions: Option<PermissionsToml>,
-    // ... 100+ 可选字段
+提供**声明式配置编辑**功能：
+
+- **`ConfigEdit`** 枚举：定义所有支持的配置修改操作
+  - `SetModel`：设置模型和推理强度
+  - `SetServiceTier`：设置服务层级
+  - `ReplaceMcpServers`：替换 MCP 服务器配置
+  - `SetPath`/`ClearPath`：通用路径设置/清除
+  
+- **`ConfigEditsBuilder`**：流畅 API 批量编辑配置
+  - 支持原子写入（通过 `write_atomically`）
+  - 自动处理 profile 作用域
+  - 保留 TOML 格式和注释
+
+### 2.4 权限配置 (permissions.rs)
+
+**新一代权限系统**，支持细粒度访问控制：
+
+- **`PermissionsToml`**：命名权限 profile 集合
+- **`FilesystemPermissionsToml`**：文件系统访问规则
+  - 支持特殊路径（`:root`, `:minimal`, `:project_roots`, `:tmpdir`）
+  - 支持绝对路径和相对子路径
+  - 访问模式：Read/Write/Execute
+- **`NetworkToml`**：网络访问配置
+  - 代理设置（HTTP/SOCKS5）
+  - 域名黑白名单
+  - Unix socket 控制
+
+### 2.5 Agent 角色 (agent_roles.rs)
+
+**用户自定义 Agent 角色**管理：
+
+- 从 `config.toml` 加载角色定义
+- 从 `~/.codex/agents/` 目录自动发现角色文件
+- 支持角色继承和配置合并
+- 验证角色描述和昵称候选
+
+### 2.6 网络代理 (network_proxy_spec.rs)
+
+**网络代理配置**的运行时封装：
+
+- **`NetworkProxySpec`**：网络代理规范
+- **`StartedNetworkProxy`**：已启动的代理实例
+- 集成 `codex_network_proxy` crate 的网络策略决策
+
+### 2.7 功能开关管理 (managed_features.rs)
+
+**集中式功能开关**管理：
+
+- **`ManagedFeatures`**：包装 `Features`，强制执行企业策略约束
+- 支持通过 `requirements.toml` 锁定功能开关
+- 功能依赖自动归一化
+
+### 2.8 配置服务 (service.rs)
+
+**App Server 配置 API** 实现：
+
+- **`ConfigService`**：配置读写服务
+- `read()`：读取配置（支持层溯源）
+- `write_value()`/`batch_write()`：写入配置
+- 版本控制（乐观锁）
+- 覆盖检测（检测配置是否被高层级覆盖）
+
+### 2.9 JSON Schema 生成 (schema.rs)
+
+为 `config.toml` 生成 JSON Schema：
+
+- `config_schema()`：生成配置模式
+- `features_schema()`：功能开关模式（禁止未知 key）
+- `mcp_servers_schema()`：MCP 服务器配置模式
+
+---
+
+## 3. 具体技术实现
+
+### 3.1 配置加载流程
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  ConfigBuilder  │────▶│ load_config_layers│────▶│ ConfigLayerStack│
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+                                                          │
+                              ┌───────────────────────────┼───────────┐
+                              ▼                           ▼           ▼
+                        ┌─────────┐                ┌────────────┐ ┌─────────┐
+                        │ System  │                │    User    │ │ Project │
+                        │  Layer  │                │   Layer    │ │ Layers  │
+                        └─────────┘                └────────────┘ └─────────┘
+```
+
+配置层级（从低到高优先级）：
+1. **System**: `/etc/codex/config.toml`
+2. **User**: `~/.codex/config.toml`
+3. **CWD**: `./config.toml`
+4. **Tree**: 向上查找 `./.codex/config.toml`
+5. **Repo**: `$(git root)/.codex/config.toml`
+6. **Runtime**: CLI 参数覆盖
+
+### 3.2 配置合并算法
+
+```rust
+// mod.rs: merge_toml_values
+pub fn merge_toml_values(base: &mut TomlValue, overlay: &TomlValue) {
+    // 递归合并 TOML 表
+    // 数组和标量直接替换
 }
 ```
 
-### 约束系统
+合并规则：
+- 表（Table）：递归合并，overlay 的 key 覆盖 base
+- 数组（Array）：overlay 完全替换 base
+- 标量：overlay 直接替换 base
 
-配置模块使用 `codex_config::Constrained<T>` 实现约束：
+### 3.3 配置编辑实现
+
+使用 `toml_edit` crate 实现**保留格式的编辑**：
+
+```rust
+// edit.rs: ConfigDocument
+fn apply(&mut self, edit: &ConfigEdit) -> anyhow::Result<bool> {
+    match edit {
+        ConfigEdit::SetPath { segments, value } => {
+            self.insert(segments, value.clone())
+        }
+        ConfigEdit::ClearPath { segments } => {
+            self.remove(segments)
+        }
+        // ...
+    }
+}
+```
+
+关键特性：
+- 保留原始 TOML 格式和注释
+- 自动创建中间表
+- Profile 作用域自动处理
+
+### 3.4 权限编译流程
+
+```rust
+// permissions.rs: compile_permission_profile
+fn compile_permission_profile(
+    permissions: &PermissionsToml,
+    profile_name: &str,
+    startup_warnings: &mut Vec<String>,
+) -> io::Result<(FileSystemSandboxPolicy, NetworkSandboxPolicy)> {
+    // 1. 解析文件系统权限
+    // 2. 编译网络策略
+    // 3. 生成运行时策略对象
+}
+```
+
+### 3.5 约束系统
+
+使用 `codex_config::Constrained<T>` 实现**策略约束**：
 
 ```rust
 pub struct Constrained<T> {
     value: T,
-    constraint: Option<Constraint>,
+    constraint: Constraint,
 }
 
-pub struct ConstrainedWithSource<T> {
-    value: Constrained<T>,
-    source: Option<RequirementSource>,  // 约束来源
+impl<T> Constrained<T> {
+    pub fn can_set(&self, candidate: &T) -> ConstraintResult<()>;
+    pub fn set(&mut self, candidate: T) -> ConstraintResult<()>;
 }
 ```
 
-约束来源包括：
-- `requirements.toml`（云/企业策略）
-- `ConfigRequirements` 中的显式约束
+支持的约束：
+- `approval_policy`：必须满足 requirements.toml 要求
+- `sandbox_policy`：企业策略可强制沙箱模式
+- `web_search_mode`：控制网络搜索能力
 
 ---
 
-## 关键代码路径与文件引用
+## 4. 关键代码路径与文件引用
 
-### 核心文件
+### 4.1 核心文件结构
 
-| 文件 | 行数 | 职责 |
+```
+codex-rs/core/src/config/
+├── mod.rs                    # 核心 Config 结构体和加载逻辑 (2977 lines)
+├── types.rs                  # 配置类型定义 (970 lines)
+├── profile.rs                # ConfigProfile 定义 (79 lines)
+├── edit.rs                   # 配置编辑实现 (981 lines)
+├── service.rs                # ConfigService API (738 lines)
+├── permissions.rs            # 权限配置 (416 lines)
+├── agent_roles.rs            # Agent 角色加载 (522 lines)
+├── network_proxy_spec.rs     # 网络代理配置 (337 lines)
+├── managed_features.rs       # 功能开关管理 (334 lines)
+├── schema.rs                 # JSON Schema 生成 (100 lines)
+├── config_tests.rs           # 配置测试 (196k lines, snapshot tests)
+├── edit_tests.rs             # 编辑功能测试
+├── permissions_tests.rs      # 权限测试
+├── service_tests.rs          # 服务测试
+├── types_tests.rs            # 类型测试
+├── agent_roles_tests.rs      # Agent 角色测试
+├── network_proxy_spec_tests.rs # 网络代理测试
+└── schema_tests.rs           # Schema 测试
+```
+
+### 4.2 关键类型定义
+
+| 类型 | 文件 | 用途 |
 |------|------|------|
-| `mod.rs` | ~2977 | 主配置结构、加载逻辑、验证 |
-| `types.rs` | ~970 | 配置类型定义（MCP、Memories、TUI 等）|
-| `edit.rs` | ~981 | 配置编辑 API、持久化 |
-| `service.rs` | ~738 | App Server 配置服务 |
-| `permissions.rs` | ~416 | 权限配置文件系统/网络权限 |
-| `agent_roles.rs` | ~522 | Agent 角色加载和验证 |
-| `profile.rs` | ~79 | Profile 结构定义 |
-| `schema.rs` | ~100 | JSON Schema 生成 |
-| `managed_features.rs` | ~334 | 功能标志约束管理 |
-| `network_proxy_spec.rs` | ~337 | 网络代理规范 |
+| `Config` | mod.rs:231 | 运行时配置 |
+| `ConfigToml` | mod.rs:1194 | TOML 配置结构 |
+| `ConfigBuilder` | mod.rs:593 | 配置构建器 |
+| `ConfigOverrides` | mod.rs:1931 | 配置覆盖项 |
+| `Permissions` | mod.rs:196 | 权限配置 |
+| `McpServerConfig` | types.rs:68 | MCP 服务器配置 |
+| `ManagedFeatures` | managed_features.rs:24 | 功能开关管理 |
+| `ConfigService` | service.rs:112 | 配置服务 |
+| `ConfigEdit` | edit.rs:25 | 配置编辑操作 |
 
-### 测试文件
+### 4.3 关键函数路径
 
-| 文件 | 行数 | 覆盖内容 |
-|------|------|----------|
-| `config_tests.rs` | ~6000+ | 主配置加载、验证、profile、权限测试 |
-| `edit_tests.rs` | ~987 | 配置编辑持久化测试 |
-| `permissions_tests.rs` | ~9 | 权限路径规范化测试 |
-| `schema_tests.rs` | - | Schema 生成测试 |
-| `service_tests.rs` | - | 配置服务测试 |
-| `types_tests.rs` | - | 类型测试 |
-| `network_proxy_spec_tests.rs` | ~9 | 网络代理测试 |
-
-### 关键函数路径
-
-```
-// 配置加载
-ConfigBuilder::build()                           [mod.rs:634]
-  → load_config_layers_state()                   [config_loader.rs]
-  → Config::load_config_with_layer_stack()       [mod.rs:2105]
-    → validate_reserved_model_provider_ids()     [mod.rs:1959]
-    → ManagedFeatures::from_configured()         [managed_features.rs:30]
-    → compile_permission_profile()               [permissions.rs:159]
-    → agent_roles::load_agent_roles()            [agent_roles.rs:17]
-
-// 配置编辑
-ConfigEditsBuilder::apply()                      [edit.rs:970]
-  → apply_blocking()                             [edit.rs:689]
-    → ConfigDocument::apply()                    [edit.rs:320]
-      → write_atomically()                       [path_utils.rs]
-
-// 配置服务
-ConfigService::read()                            [service.rs:143]
-ConfigService::batch_write()                     [service.rs:222]
-  → apply_edits()                                [service.rs:251]
-
-// Schema 生成
-config_schema()                                  [schema.rs:56]
-  → SchemaSettings::draft07().into_generator()
-```
+| 函数 | 文件 | 用途 |
+|------|------|------|
+| `Config::load_with_cli_overrides` | mod.rs:801 | 主入口：加载配置 |
+| `Config::load_config_with_layer_stack` | mod.rs:2105 | 从层栈加载配置 |
+| `load_config_layers_state` | config_loader/mod.rs:114 | 加载配置层 |
+| `compile_permission_profile` | permissions.rs:159 | 编译权限配置 |
+| `load_agent_roles` | agent_roles.rs:17 | 加载 Agent 角色 |
+| `apply_blocking` | edit.rs:689 | 原子写入配置 |
+| `validate_explicit_feature_settings` | managed_features.rs:259 | 验证功能开关 |
 
 ---
 
-## 依赖与外部交互
+## 5. 依赖与外部交互
 
-### 内部依赖（codex-rs）
+### 5.1 内部依赖
 
 ```
-codex-rs/core/src/config
-├── 依赖 codex_protocol          # 协议类型（SandboxPolicy, AskForApproval 等）
-├── 依赖 codex_config            # 约束系统（Constrained, ConstraintError）
-├── 依赖 codex_network_proxy     # 网络代理（NetworkProxy, NetworkProxyConfig）
-├── 依赖 codex_app_server_protocol # App Server API 类型
-├── 依赖 codex_utils_absolute_path # 绝对路径处理
-├── 依赖 codex_git               # GhostSnapshotConfig
-└── 被依赖
-    ├── codex-rs/core/src/codex.rs           # 主 Codex 结构
-    ├── codex-rs/core/src/config_loader.rs   # 配置层加载
-    ├── codex-rs/core/src/features.rs        # 功能标志定义
-    ├── codex-rs/tui/src/                    # TUI 配置使用
-    └── codex-rs/cli/src/                    # CLI 配置使用
+config/
+├── config_loader/            # 配置层加载
+│   └── mod.rs                # ConfigLayerStack, load_config_layers_state
+├── features/                 # 功能开关定义
+│   └── mod.rs                # Feature, Features
+├── protocol/                 # 协议类型
+│   └── mod.rs                # SandboxPolicy, AskForApproval
+├── git_info/                 # Git 信息
+│   └── mod.rs                # resolve_root_git_project_for_trust
+└── path_utils/               # 路径工具
+    └── mod.rs                # write_atomically, resolve_symlink_write_paths
 ```
 
-### 外部 Crate 依赖
+### 5.2 外部 Crate 依赖
 
 | Crate | 用途 |
 |-------|------|
-| `toml` / `toml_edit` | TOML 解析和保留格式的编辑 |
-| `schemars` | JSON Schema 生成 |
+| `toml` / `toml_edit` | TOML 解析和编辑 |
 | `serde` | 序列化/反序列化 |
-| `wildmatch` | 通配符匹配（环境变量模式） |
-| `tempfile` | 测试临时目录 |
+| `schemars` | JSON Schema 生成 |
+| `codex_config` | 配置层和约束系统 |
+| `codex_protocol` | 协议类型定义 |
+| `codex_app_server_protocol` | App Server API 类型 |
+| `codex_network_proxy` | 网络代理配置 |
+| `codex_utils_absolute_path` | 绝对路径处理 |
+| `wildmatch` | 通配符匹配（环境变量过滤）|
 
-### 配置文件交互
+### 5.3 配置文件交互
 
-```
-~/.codex/
-├── config.toml              # 用户配置（读写）
-├── history.jsonl            # 历史记录（由 history 模块写入）
-└── log/                     # 日志目录
-
-<project>/.codex/
-└── config.toml              # 项目配置（只读）
-
-<project>/requirements.toml   # 云需求配置（只读，可选）
-```
-
----
-
-## 风险、边界与改进建议
-
-### 已知风险
-
-1. **配置复杂性**：`Config` 结构体有 80+ 字段，`ConfigToml` 有 100+ 字段，维护困难
-   - 建议：拆分为子模块配置（ModelConfig, PermissionConfig 等）
-
-2. **TOML 编辑限制**：`toml_edit` 虽然保留格式，但复杂编辑可能导致意外格式变化
-   - 建议：增加更多编辑测试覆盖边缘情况
-
-3. **约束验证分散**：约束验证逻辑分布在多个文件（mod.rs, managed_features.rs, permissions.rs）
-   - 建议：统一约束验证框架
-
-4. **测试文件过大**：`config_tests.rs` 超过 6000 行，编译和导航困难
-   - 建议：按功能拆分为多个测试模块
-
-### 边界情况
-
-1. **空配置处理**：所有 TOML 字段为 `Option<T>`，需确保默认值正确
-2. **路径解析**：Windows/Linux 路径差异处理（见 `permissions.rs` 中的平台特定代码）
-3. **Symlink 处理**：配置编辑正确处理符号链接（`resolve_symlink_write_paths`）
-4. **并发编辑**：`ConfigService` 使用版本检查防止并发覆盖
-
-### 改进建议
-
-1. **配置热重载**：当前配置加载后不可变，考虑支持运行时重载部分配置
-2. **配置验证增强**：增加更多语义验证（如模型名称有效性检查）
-3. **文档生成**：从代码自动生成配置文档，保持与代码同步
-4. **迁移框架**：建立更通用的配置迁移框架，支持版本间自动迁移
-5. **类型安全**：使用 newtype 模式增强配置值类型安全（如 `ModelName(String)`）
-
-### 测试覆盖
-
-- ✅ 基础 TOML 解析
-- ✅ Profile 切换和继承
-- ✅ 权限配置文件编译
-- ✅ 配置编辑持久化
-- ✅ MCP 服务器配置
-- ✅ 功能标志约束
-- ⚠️ 网络代理配置（测试较少）
-- ⚠️ Agent 角色加载（边缘情况测试不足）
+| 文件 | 用途 |
+|------|------|
+| `~/.codex/config.toml` | 用户主配置 |
+| `/etc/codex/config.toml` | 系统配置（Unix）|
+| `%ProgramData%\OpenAI\Codex\config.toml` | 系统配置（Windows）|
+| `~/.codex/requirements.toml` | 企业策略约束 |
+| `.codex/config.toml` | 项目配置 |
+| `~/.codex/agents/*.toml` | Agent 角色定义 |
 
 ---
 
-## 总结
+## 6. 风险、边界与改进建议
 
-`codex-rs/core/src/config` 是 Codex 项目的配置中枢，设计精良，支持：
+### 6.1 已知风险
 
-- **多层配置叠加**：用户、项目、CLI、云需求四层配置
-- **灵活的配置编辑**：声明式 API + 格式保留
-- **强约束验证**：requirements.toml 支持企业策略
-- **丰富的功能**：MCP、Agent 角色、权限系统、功能标志
+#### 6.1.1 配置合并复杂性
 
-该模块代码量大（~7000 行生产代码 + ~7000 行测试代码），是 Codex 核心中最复杂的模块之一，维护时需要特别注意配置项的向后兼容性。
+**风险**：多层配置合并可能导致意外的值覆盖，特别是在 `features` 和 `profiles` 嵌套场景中。
+
+**缓解**：
+- 使用 `ConfigLayerStack::origins()` 追踪配置来源
+- `ConfigService` 提供覆盖检测（`OverriddenMetadata`）
+
+#### 6.1.2 TOML 编辑格式丢失
+
+**风险**：`toml_edit` 在某些复杂场景下可能丢失格式或注释。
+
+**缓解**：
+- 使用 `preserve_decor` 保留装饰信息
+- 测试覆盖主要编辑场景
+
+#### 6.1.3 权限配置错误
+
+**风险**：错误的权限配置可能导致沙箱逃逸或功能不可用。
+
+**缓解**：
+- 启动时验证权限配置并生成警告
+- 特殊路径（`:root` 等）经过严格解析
+
+### 6.2 边界情况
+
+| 场景 | 行为 |
+|------|------|
+| 配置文件不存在 | 使用空表继续，不报错 |
+| 配置文件格式错误 | 返回详细错误，包含行号信息 |
+| 循环配置引用 | 通过层栈顺序避免循环 |
+| 并发配置写入 | 乐观锁（version）检测冲突 |
+| 权限 profile 不存在 | 启动时警告，使用默认限制 |
+
+### 6.3 改进建议
+
+#### 6.3.1 配置验证增强
+
+```rust
+// 建议：添加配置验证 trait
+pub trait ConfigValidator {
+    fn validate(&self) -> Result<(), ConfigValidationError>;
+}
+
+impl ConfigValidator for ConfigToml {
+    fn validate(&self) -> Result<(), ConfigValidationError> {
+        // 验证模型提供商存在
+        // 验证路径可访问
+        // 验证依赖配置一致性
+    }
+}
+```
+
+#### 6.3.2 配置热重载
+
+当前配置在启动时加载，建议支持运行时重载：
+
+```rust
+pub struct ConfigWatcher {
+    watcher: notify::RecommendedWatcher,
+    reload_tx: mpsc::Sender<ConfigUpdate>,
+}
+```
+
+#### 6.3.3 配置文档生成
+
+利用现有的 `schemars` 集成，自动生成配置文档：
+
+```rust
+// 生成带注释的配置示例
+pub fn generate_config_example() -> String {
+    // 基于 ConfigToml 结构生成 TOML 示例
+}
+```
+
+#### 6.3.4 测试覆盖
+
+- 当前 `config_tests.rs` 有 196k 行（主要是 snapshot 测试）
+- 建议增加更多单元测试覆盖边界情况
+- 考虑使用 `insta` 进行结构化 snapshot 测试
+
+### 6.4 技术债务
+
+| 项目 | 位置 | 建议 |
+|------|------|------|
+| 遗留配置迁移 | mod.rs:750 | `smart_approvals` 迁移代码可移除 |
+| 实验性功能字段 | mod.rs:1505 | `experimental_*` 字段应逐步稳定或移除 |
+| 平台特定代码 | permissions.rs:293 | Windows 路径处理可提取到独立模块 |
+
+---
+
+## 7. 总结
+
+`codex-rs/core/src/config` 是 Codex 项目的配置中枢，通过分层配置、约束系统和类型安全编辑，实现了灵活而可靠的配置管理。模块设计良好，职责清晰，支持从个人用户到企业部署的广泛场景。
+
+关键成功因素：
+1. **分层配置模型**：清晰的用户/系统/项目配置分离
+2. **约束系统**：企业策略的强制执行能力
+3. **类型安全**：编译时配置路径验证
+4. **原子编辑**：配置修改的安全持久化
+5. **丰富测试**：snapshot 测试保障配置行为稳定
