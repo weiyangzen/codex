@@ -1,322 +1,447 @@
-# codex-rs/connectors 研究文档
+# DIR codex-rs/connectors 深度研究文档
 
-## 概述
+## 1. 场景与职责
 
-`codex-connectors` crate 是 Codex 项目中负责**连接器目录管理**的基础组件。它提供了从 ChatGPT 后端获取、缓存、合并和标准化连接器（Apps/Connectors）元数据的核心功能。该 crate 作为数据访问层，为上层的 `codex-core` 和 `codex-chatgpt` 提供统一的连接器列表服务。
+### 1.1 模块定位
 
----
+`codex-rs/connectors` 是 Codex CLI 项目中负责**连接器（Connectors/Apps）目录管理**的核心模块。连接器是指第三方应用集成（如 ChatGPT 插件、MCP 工具等），该模块提供：
 
-## 场景与职责
+- 从 ChatGPT 后端获取完整的连接器目录列表
+- 缓存机制优化性能（TTL 1小时）
+- 支持分页获取大量连接器数据
+- 合并目录连接器与可访问连接器的状态
+- 过滤和规范化连接器元数据
 
-### 核心场景
+### 1.2 业务场景
 
-1. **连接器目录发现**：从 ChatGPT 后端 API 获取可用的连接器列表
-2. **元数据缓存管理**：提供进程级内存缓存，避免频繁请求后端 API
-3. **数据合并与标准化**：合并来自不同来源（目录列表、工作区列表）的连接器数据
-4. **插件应用集成**：支持将插件应用与目录连接器合并展示
-
-### 主要职责
-
-| 职责 | 说明 |
+| 场景 | 说明 |
 |------|------|
-| 数据获取 | 通过分页 API 获取目录连接器和（可选的）工作区连接器 |
-| 缓存管理 | 基于 `AllConnectorsCacheKey` 的进程级缓存，TTL 为 3600 秒 |
-| 数据合并 | 合并同一连接器的多个来源数据，优先保留非空字段 |
-| 数据标准化 | 规范化连接器名称、生成安装 URL、过滤隐藏应用 |
-| 错误容错 | 工作区连接器获取失败时返回空列表而非错误 |
+| TUI 应用列表展示 | TUI 界面需要展示用户可安装/已安装的连接器 |
+| App Server API | 通过 `app/list` RPC 方法暴露连接器列表 |
+| 插件集成 | 将插件配置的连接器与目录数据合并 |
+| 工具发现 | Tool Suggest 功能需要获取可发现的连接器 |
 
----
+### 1.3 架构位置
 
-## 功能点目的
-
-### 1. 连接器列表获取 (`list_all_connectors_with_options`)
-
-**目的**：提供统一的连接器列表获取接口，支持缓存和强制刷新。
-
-**关键特性**：
-- 支持基于 `AllConnectorsCacheKey` 的缓存查找
-- 支持 `force_refetch` 强制绕过缓存
-- 自动合并目录连接器和工作区连接器（仅对工作区账户）
-- 对连接器数据进行标准化处理（名称、URL、排序）
-
-### 2. 分页数据获取 (`list_directory_connectors` / `list_workspace_connectors`)
-
-**目的**：处理后端 API 的分页响应，获取完整的连接器列表。
-
-**API 端点**：
-- 目录连接器：`/connectors/directory/list?tier=categorized&external_logos=true`
-- 工作区连接器：`/connectors/directory/list_workspace?external_logos=true`
-
-**分页处理**：
-- 使用 `next_token` 进行分页遍历
-- URL 编码处理 token 中的特殊字符
-- 过滤 `visibility: "HIDDEN"` 的隐藏应用
-
-### 3. 数据合并 (`merge_directory_apps` / `merge_directory_app`)
-
-**目的**：当同一连接器出现在多个来源（如目录列表和工作区列表）时，智能合并字段。
-
-**合并策略**（字段级别优先级）：
-- 名称：优先非空值
-- 描述：优先非空值
-- Logo URL：优先第一个非空值
-- Branding 信息：递归合并各子字段
-- AppMetadata：递归合并各子字段
-
-### 4. 数据标准化
-
-**目的**：确保连接器数据的一致性和可用性。
-
-**标准化操作**：
-- `normalize_connector_name`：空名称时使用 ID 作为名称
-- `normalize_connector_value`：去除空白，过滤空字符串
-- `connector_name_slug`：生成 URL 友好的 slug（小写、非字母数字转 `-`）
-- `connector_install_url`：生成 `https://chatgpt.com/apps/{slug}/{connector_id}` 格式的安装链接
-
-### 5. 进程级缓存
-
-**目的**：减少后端 API 调用，提升性能。
-
-**缓存机制**：
-- 全局静态变量 `ALL_CONNECTORS_CACHE`（`LazyLock<StdMutex<Option<CachedAllConnectors>>>`）
-- 缓存键包含：base URL、账户 ID、用户 ID、工作区账户标志
-- TTL：3600 秒（`CONNECTORS_CACHE_TTL`）
-- 自动过期清理
-
----
-
-## 具体技术实现
-
-### 关键数据结构
-
-#### `AllConnectorsCacheKey`
-```rust
-pub struct AllConnectorsCacheKey {
-    chatgpt_base_url: String,
-    account_id: Option<String>,
-    chatgpt_user_id: Option<String>,
-    is_workspace_account: bool,
-}
 ```
-缓存键设计考虑了多租户场景，确保不同用户/账户的缓存隔离。
+┌─────────────────────────────────────────────────────────────┐
+│                        调用方层                              │
+│  ┌──────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+│  │ TUI      │  │ App Server   │  │ Tool Suggest         │  │
+│  └────┬─────┘  └──────┬───────┘  └──────────┬───────────┘  │
+└───────┼───────────────┼─────────────────────┼──────────────┘
+        │               │                     │
+        ▼               ▼                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    codex-chatgpt                             │
+│              (高层业务逻辑封装层)                             │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │         codex-connectors (本模块)                      │  │
+│  │  • 目录列表获取 (list_directory_connectors)            │  │
+│  │  • 工作区连接器获取 (list_workspace_connectors)        │  │
+│  │  • 缓存管理 (cached_all_connectors)                    │  │
+│  │  • 数据合并与规范化                                    │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│              codex-app-server-protocol                       │
+│           (AppInfo, AppBranding, AppMetadata 类型定义)       │
+└─────────────────────────────────────────────────────────────┘
+```
 
-#### `DirectoryApp`
+---
+
+## 2. 功能点目的
+
+### 2.1 核心功能清单
+
+| 功能 | 目的 | 关键 API |
+|------|------|----------|
+| **目录连接器获取** | 从 ChatGPT 后端获取完整连接器目录 | `list_directory_connectors()` |
+| **工作区连接器获取** | 获取用户工作区专属的连接器 | `list_workspace_connectors()` |
+| **缓存管理** | 避免频繁请求后端，TTL 1小时 | `cached_all_connectors()`, `write_cached_all_connectors()` |
+| **数据合并** | 合并多个来源的连接器元数据 | `merge_directory_apps()` |
+| **数据规范化** | 清理名称、描述、生成安装 URL | `normalize_connector_name()`, `connector_install_url()` |
+| **完整列表获取** | 组合目录和工作区连接器 | `list_all_connectors_with_options()` |
+
+### 2.2 数据结构
+
+#### 2.2.1 DirectoryApp（原始目录数据）
+
 ```rust
+#[derive(Debug, Deserialize, Clone)]
 pub struct DirectoryApp {
-    id: String,
-    name: String,
-    description: Option<String>,
-    app_metadata: Option<AppMetadata>,
-    branding: Option<AppBranding>,
-    labels: Option<HashMap<String, String>>,
-    logo_url: Option<String>,
-    logo_url_dark: Option<String>,
-    distribution_channel: Option<String>,
-    visibility: Option<String>,
+    id: String,                           // 连接器唯一标识
+    name: String,                         // 显示名称
+    description: Option<String>,          // 描述
+    app_metadata: Option<AppMetadata>,    // 应用元数据（分类、版本等）
+    branding: Option<AppBranding>,        // 品牌信息（开发者、网站等）
+    labels: Option<HashMap<String, String>>, // 标签
+    logo_url: Option<String>,             // Logo URL（亮色模式）
+    logo_url_dark: Option<String>,        // Logo URL（暗色模式）
+    distribution_channel: Option<String>, // 分发渠道
+    visibility: Option<String>,           // 可见性（HIDDEN 等）
 }
 ```
-后端 API 的原始响应结构，使用 `serde(alias)` 处理蛇峰命名转换。
 
-#### `DirectoryListResponse`
+#### 2.2.2 DirectoryListResponse（API 响应）
+
 ```rust
+#[derive(Debug, Deserialize)]
 pub struct DirectoryListResponse {
-    apps: Vec<DirectoryApp>,
-    next_token: Option<String>,
+    apps: Vec<DirectoryApp>,              // 连接器列表
+    next_token: Option<String>,           // 分页令牌
 }
 ```
-分页响应结构，`next_token` 用于后续分页请求。
 
-### 关键流程
+#### 2.2.3 AllConnectorsCacheKey（缓存键）
 
-#### 连接器列表获取流程
-
+```rust
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllConnectorsCacheKey {
+    chatgpt_base_url: String,             // ChatGPT 后端地址
+    account_id: Option<String>,           // 账户 ID
+    chatgpt_user_id: Option<String>,     // 用户 ID
+    is_workspace_account: bool,          // 是否工作区账户
+}
 ```
-list_all_connectors_with_options
-├── 检查缓存（如果 !force_refetch）
-│   └── 返回缓存数据（如果命中且未过期）
-├── list_directory_connectors (分页获取)
-│   ├── 构建请求路径（含 token）
-│   ├── 调用 fetch_page 闭包
-│   ├── 过滤 HIDDEN 应用
-│   └── 处理 next_token 循环
-├── list_workspace_connectors (可选，仅工作区账户)
-│   ├── 调用 fetch_page
-│   └── 失败时返回空列表（容错）
-├── merge_directory_apps (合并重复)
-├── directory_app_to_app_info (转换为 AppInfo)
-├── 标准化处理（名称、URL、排序）
-└── 写入缓存
-```
-
-#### 数据合并流程
-
-```
-merge_directory_apps
-├── 使用 HashMap 按 ID 分组
-├── 对于重复 ID：
-│   └── merge_directory_app
-│       ├── 合并基础字段（name, description, logo_url...）
-│       ├── 合并 branding（递归字段级合并）
-│       ├── 合并 app_metadata（递归字段级合并）
-│       └── 合并 labels
-└── 返回合并后的 Vec<DirectoryApp>
-```
-
-### 协议与 API
-
-#### 依赖的协议类型
-
-该 crate 依赖 `codex-app-server-protocol` 中的以下类型：
-
-- `AppInfo`：标准化的连接器信息结构（输出类型）
-- `AppBranding`：品牌信息（分类、开发者、网站等）
-- `AppMetadata`：应用元数据（分类、截图、版本等）
-
-#### HTTP API 接口
-
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/connectors/directory/list` | GET | 获取目录连接器列表 |
-| `/connectors/directory/list_workspace` | GET | 获取工作区连接器列表（仅工作区账户） |
-
-**查询参数**：
-- `tier=categorized`：请求分类层级的连接器
-- `external_logos=true`：请求外部 Logo URL
-- `token={encoded_token}`：分页令牌（可选）
 
 ---
 
-## 关键代码路径与文件引用
+## 3. 具体技术实现
 
-### 当前 crate 文件
+### 3.1 关键流程
 
-| 文件 | 行数 | 说明 |
+#### 3.1.1 获取连接器列表流程
+
+```
+list_all_connectors_with_options()
+    │
+    ├─► 检查缓存 (cached_all_connectors)
+    │   └─► 缓存命中 → 返回缓存数据
+    │
+    ├─► 缓存未命中/强制刷新
+    │   │
+    │   ├─► list_directory_connectors()      // 获取目录连接器
+    │   │   ├─► 构建请求路径 /connectors/directory/list
+    │   │   ├─► 支持分页 (next_token)
+    │   │   ├─► 过滤 HIDDEN 可见性的应用
+    │   │   └─► 返回 DirectoryApp 列表
+    │   │
+    │   ├─► list_workspace_connectors()      // 获取工作区连接器（仅工作区账户）
+    │   │   └─► 请求路径 /connectors/directory/list_workspace
+    │   │
+    │   ├─► merge_directory_apps()           // 合并重复连接器元数据
+    │   │   └─► 策略：非空字段优先，合并 branding 和 app_metadata
+    │   │
+    │   ├─► directory_app_to_app_info()      // 转换为 AppInfo
+    │   │   ├─► 生成 install_url
+    │   │   ├─► 规范化名称和描述
+    │   │   └─► 设置 is_accessible = false
+    │   │
+    │   └─► 排序（按名称、ID）
+    │
+    └─► 写入缓存 (write_cached_all_connectors)
+        └─► TTL = 3600 秒 (CONNECTORS_CACHE_TTL)
+```
+
+#### 3.1.2 缓存机制
+
+```rust
+// 全局静态缓存
+static ALL_CONNECTORS_CACHE: LazyLock<StdMutex<Option<CachedAllConnectors>>> = 
+    LazyLock::new(|| StdMutex::new(None));
+
+pub const CONNECTORS_CACHE_TTL: Duration = Duration::from_secs(3600);
+
+struct CachedAllConnectors {
+    key: AllConnectorsCacheKey,      // 缓存键（包含用户标识）
+    expires_at: Instant,              // 过期时间
+    connectors: Vec<AppInfo>,         // 缓存数据
+}
+```
+
+### 3.2 关键算法
+
+#### 3.2.1 连接器合并策略
+
+```rust
+fn merge_directory_app(existing: &mut DirectoryApp, incoming: DirectoryApp) {
+    // 名称：仅当现有名称为空时更新
+    if existing.name.trim().is_empty() && !incoming_name_is_empty {
+        existing.name = name;
+    }
+    
+    // 描述：传入描述非空时更新
+    if incoming_description_present {
+        existing.description = description;
+    }
+    
+    // Logo URL：现有为空时更新
+    if existing.logo_url.is_none() && logo_url.is_some() {
+        existing.logo_url = logo_url;
+    }
+    
+    // Branding 字段级合并（每个字段独立判断）
+    if let Some(incoming_branding) = branding {
+        if let Some(existing_branding) = existing.branding.as_mut() {
+            if existing_branding.category.is_none() && incoming_branding.category.is_some() {
+                existing_branding.category = incoming_branding.category;
+            }
+            // ... 其他字段类似
+        }
+    }
+    
+    // AppMetadata 字段级合并
+    // ... 类似逻辑
+}
+```
+
+#### 3.2.2 安装 URL 生成
+
+```rust
+fn connector_install_url(name: &str, connector_id: &str) -> String {
+    let slug = connector_name_slug(name);
+    format!("https://chatgpt.com/apps/{slug}/{connector_id}")
+}
+
+fn connector_name_slug(name: &str) -> String {
+    let mut normalized = String::with_capacity(name.len());
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            normalized.push(character.to_ascii_lowercase());
+        } else {
+            normalized.push('-');  // 非字母数字字符替换为连字符
+        }
+    }
+    let normalized = normalized.trim_matches('-');
+    if normalized.is_empty() {
+        "app".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+```
+
+### 3.3 API 端点
+
+| 端点 | 用途 | 参数 |
 |------|------|------|
-| `codex-rs/connectors/src/lib.rs` | 534 | 主实现文件，包含所有核心逻辑和测试 |
-| `codex-rs/connectors/Cargo.toml` | 18 | 包配置，依赖 `codex-app-server-protocol` |
-| `codex-rs/connectors/BUILD.bazel` | 6 | Bazel 构建配置 |
-
-### 调用方（上游）
-
-| 文件 | 用途 |
-|------|------|
-| `codex-rs/chatgpt/src/connectors.rs` | 主要调用方，封装 HTTP 客户端逻辑，提供 `list_all_connectors` 等接口 |
-| `codex-rs/core/src/connectors.rs` | 通过 `codex-chatgpt` 间接使用，处理 MCP 工具相关的连接器逻辑 |
-| `codex-rs/app-server/src/codex_message_processor/plugin_app_helpers.rs` | 加载插件应用摘要 |
-| `codex-rs/tui/src/chatwidget.rs` | TUI 界面使用连接器功能 |
-| `codex-rs/tui_app_server/src/chatwidget.rs` | TUI App Server 使用连接器功能 |
-
-### 被调用方/依赖（下游）
-
-| 包/模块 | 提供的类型 |
-|---------|-----------|
-| `codex-app-server-protocol` | `AppInfo`, `AppBranding`, `AppMetadata` |
-| `serde` | 反序列化支持 |
-| `urlencoding` | URL 编码处理 |
+| `GET /connectors/directory/list` | 获取目录连接器 | `tier=categorized`, `token={pagination}`, `external_logos=true` |
+| `GET /connectors/directory/list_workspace` | 获取工作区连接器 | `external_logos=true` |
 
 ---
 
-## 依赖与外部交互
+## 4. 关键代码路径与文件引用
 
-### 外部依赖
+### 4.1 本模块文件
+
+| 文件 | 职责 | 关键内容 |
+|------|------|----------|
+| `src/lib.rs` | 主实现 | 534 行，包含全部核心逻辑和测试 |
+| `Cargo.toml` | 包配置 | 依赖：anyhow, serde, urlencoding, codex-app-server-protocol |
+| `BUILD.bazel` | Bazel 构建 | 使用 codex_rust_crate 规则 |
+
+### 4.2 调用方代码路径
+
+| 模块 | 文件 | 调用点 |
+|------|------|--------|
+| codex-chatgpt | `src/connectors.rs` | `list_all_connectors_with_options()`, `cached_all_connectors()` |
+| codex-core | `src/connectors.rs` | 通过 codex-chatgpt 间接使用 |
+| app-server | `src/codex_message_processor/plugin_app_helpers.rs` | `list_all_connectors_with_options()` |
+| tui | `src/chatwidget.rs` | `connectors::list_all_connectors_with_options()` |
+
+### 4.3 依赖协议定义
+
+| 模块 | 文件 | 类型定义 |
+|------|------|----------|
+| app-server-protocol | `src/protocol/v2.rs` | `AppInfo`, `AppBranding`, `AppMetadata`, `AppSummary` |
+
+---
+
+## 5. 依赖与外部交互
+
+### 5.1 依赖清单
 
 ```toml
 [dependencies]
-anyhow = { workspace = true }
-codex-app-server-protocol = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-urlencoding = { workspace = true }
+anyhow = { workspace = true }                           # 错误处理
+codex-app-server-protocol = { workspace = true }        # 协议类型定义
+serde = { workspace = true, features = ["derive"] }     # 序列化
+urlencoding = { workspace = true }                      # URL 编码
 ```
 
-### 运行时依赖
-
-该 crate 本身不直接发起 HTTP 请求，而是通过**回调函数**（`fetch_page` 闭包）将实际的网络请求委托给调用方。这种设计：
-
-1. **解耦网络逻辑**：crate 专注于业务逻辑，不依赖特定 HTTP 客户端
-2. **便于测试**：测试可以注入模拟的 `fetch_page` 实现
-3. **灵活适配**：调用方可以添加认证、超时、重试等逻辑
-
-### 与 `codex-chatgpt` 的交互
+### 5.2 外部交互
 
 ```
-codex-chatgpt/src/connectors.rs
-├── 构建 AllConnectorsCacheKey
-├── 调用 codex_connectors::list_all_connectors_with_options
-│   └── 提供 fetch_page 闭包（使用 chatgpt_get_request_with_timeout）
-├── 调用 merge_plugin_apps（合并插件应用）
-└── 调用 filter_disallowed_connectors（过滤不允许的连接器）
+┌─────────────────────────────────────────────────────────────┐
+│                    codex-connectors                          │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+        ┌───────────────┼───────────────┐
+        ▼               ▼               ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ ChatGPT API  │ │  Static Cache│ │App Server    │
+│ (HTTP GET)   │ │  (Mutex)     │ │Protocol Types│
+└──────────────┘ └──────────────┘ └──────────────┘
+```
+
+### 5.3 HTTP 请求详情
+
+请求由调用方（codex-chatgpt）通过回调函数 `fetch_page` 注入：
+
+```rust
+pub async fn list_all_connectors_with_options<F, Fut>(
+    cache_key: AllConnectorsCacheKey,
+    is_workspace_account: bool,
+    force_refetch: bool,
+    mut fetch_page: F,  // 注入的 HTTP 请求函数
+) -> anyhow::Result<Vec<AppInfo>>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = anyhow::Result<DirectoryListResponse>>,
+```
+
+实际 HTTP 请求在 `codex-chatgpt/src/connectors.rs` 中实现：
+
+```rust
+let connectors = codex_connectors::list_all_connectors_with_options(
+    cache_key,
+    token_data.id_token.is_workspace_account(),
+    force_refetch,
+    |path| async move {
+        chatgpt_get_request_with_timeout::<DirectoryListResponse>(
+            config,
+            path,
+            Some(DIRECTORY_CONNECTORS_TIMEOUT),
+        )
+        .await
+    },
+)
+.await?;
 ```
 
 ---
 
-## 风险、边界与改进建议
+## 6. 风险、边界与改进建议
 
-### 已知风险
+### 6.1 潜在风险
 
-1. **全局缓存竞争**
-   - 使用 `StdMutex` 保护全局缓存，在高并发场景可能产生 contention
-   - 缓存是进程级的，无法跨进程共享
+| 风险 | 描述 | 影响 |
+|------|------|------|
+| **缓存污染** | 使用 `StdMutex` 而非 `RwLock`，并发读取也会阻塞 | 低（读少写少） |
+| **Poison Error** | 使用 `unwrap_or_else(std::sync::PoisonError::into_inner)` 处理毒锁 | 中（可能隐藏 panic） |
+| **内存泄漏** | 静态缓存永不清理，长期运行可能累积 | 低（数据量小） |
+| **时区敏感** | 使用 `Instant::now()` 而非系统时间，不受时区影响 | 无风险 |
 
-2. **缓存键设计局限**
-   - 缓存键包含 `chatgpt_base_url`、`account_id`、`chatgpt_user_id`，粒度较细
-   - 如果用户切换账户，缓存会失效重新获取
+### 6.2 边界情况
 
-3. **工作区连接器获取失败静默**
-   - `list_workspace_connectors` 在失败时返回空列表，调用方无法区分"无数据"和"获取失败"
+| 场景 | 处理逻辑 |
+|------|----------|
+| 空名称 | 使用 connector_id 作为名称 (`normalize_connector_name`) |
+| 空描述 | 保持 `None`，不生成默认描述 |
+| HIDDEN 可见性 | 过滤掉，不返回给调用方 (`is_hidden_directory_app`) |
+| 工作区 API 失败 | 返回空列表，不中断整体流程 |
+| 分页 token 为空 | 终止分页循环 |
+| 同名连接器 | 合并元数据，保留 ID 唯一性 |
 
-4. **内存缓存无上限**
-   - 当前缓存只存储单个条目（最新的查询），不会无限增长，但设计上是单例模式
+### 6.3 改进建议
 
-### 边界情况
+#### 6.3.1 架构层面
 
-1. **空名称处理**：当连接器名称为空时，使用 ID 作为名称
-2. **Slug 生成**：非 ASCII 字母数字字符全部替换为 `-`，可能导致连续 `-` 或首尾 `-`
-3. **分页循环**：依赖后端返回的 `next_token` 终止循环，如果后端返回异常可能导致无限循环（实际有 `is_empty()` 检查）
-4. **并发安全**：缓存读写使用 `StdMutex`，在异步上下文中需要小心持有锁的时间
+1. **缓存替换为异步友好实现**
+   ```rust
+   // 当前
+   static ALL_CONNECTORS_CACHE: LazyLock<StdMutex<Option<CachedAllConnectors>>>;
+   
+   // 建议：使用 tokio::sync::RwLock 或 dashmap
+   static ALL_CONNECTORS_CACHE: LazyLock<tokio::sync::RwLock<Option<CachedAllConnectors>>>;
+   ```
 
-### 改进建议
+2. **添加缓存失效事件**
+   - 当用户切换账户时主动失效缓存
+   - 当前依赖 TTL 过期，可能延迟更新
 
-1. **缓存策略增强**
-   - 考虑使用 `tokio::sync::RwLock` 替代 `StdMutex`，优化并发读场景
-   - 添加缓存统计（命中率、过期次数）便于监控
+3. **支持缓存持久化**
+   - 将缓存写入磁盘，应用重启后快速恢复
+   - 减少冷启动时的 API 调用
 
-2. **错误处理改进**
-   - 工作区连接器获取失败时，考虑返回错误而非空列表，让调用方决定是否忽略
-   - 添加结构化错误类型，区分网络错误、解析错误、权限错误
+#### 6.3.2 功能层面
 
-3. **可观测性**
-   - 添加 `tracing` 日志，记录缓存命中/未命中、API 请求耗时、数据合并统计
-   - 当前实现无日志输出，调试困难
+1. **添加指标监控**
+   - 缓存命中率
+   - API 请求延迟
+   - 连接器数量统计
 
-4. **测试覆盖**
-   - 当前测试覆盖了缓存共享和数据合并，但缺少：
-     - 分页获取的测试
-     - 缓存过期逻辑的测试
-     - 工作区连接器获取失败的测试
+2. **支持增量更新**
+   - 当前每次刷新获取全量数据
+   - 可支持基于 `updated_at` 的增量同步
 
-5. **API 设计优化**
-   - `fetch_page` 闭包签名可以改为引用 `&str` 避免 `String` 分配
-   - 考虑使用 `async-trait` 定义明确的接口 trait，替代闭包参数
+3. **增强错误处理**
+   - 区分网络错误和 API 错误
+   - 支持降级到缓存数据（即使已过期）
 
-6. **数据验证**
-   - 添加对 `DirectoryApp` 字段的验证（如 ID 非空、URL 格式正确）
-   - 对 `next_token` 进行长度限制，防止异常数据导致内存问题
+#### 6.3.3 代码层面
+
+1. **测试覆盖**
+   - 当前测试覆盖基本场景
+   - 可添加：
+     - 并发访问测试
+     - 缓存过期边界测试
+     - 大分页数据测试
+
+2. **文档完善**
+   - 添加更多内联文档说明合并策略
+   - 说明 `is_accessible` 字段的含义
 
 ---
 
-## 附录：类型对照表
+## 7. 测试分析
 
-| 内部类型 | 协议类型 | 说明 |
-|---------|---------|------|
-| `DirectoryApp` | - | 后端 API 原始数据结构 |
-| - | `AppInfo` | 标准化后的连接器信息（输出） |
-| - | `AppBranding` | 品牌信息（category, developer, website...） |
-| - | `AppMetadata` | 元数据（categories, screenshots, version...） |
+### 7.1 现有测试
+
+```rust
+#[tokio::test]
+async fn list_all_connectors_uses_shared_cache() -> anyhow::Result<()>
+// 验证缓存机制，确保相同 key 的第二次调用使用缓存
+
+#[tokio::test]
+async fn list_all_connectors_merges_and_normalizes_directory_apps() -> anyhow::Result<()>
+// 验证合并和规范化逻辑，包括：
+// - 空名称处理
+// - 描述合并
+// - HIDDEN 过滤
+// - branding 合并
+```
+
+### 7.2 测试策略
+
+测试使用 mock 的 `fetch_page` 函数，不依赖真实 HTTP 请求：
+
+```rust
+let connectors = list_all_connectors_with_options(key, true, true, move |path| {
+    async move {
+        // mock 响应
+        Ok(DirectoryListResponse { apps: vec![...], next_token: None })
+    }
+}).await?;
+```
 
 ---
 
-## 附录：关键常量
+## 8. 总结
 
-| 常量 | 值 | 说明 |
-|------|-----|------|
-| `CONNECTORS_CACHE_TTL` | 3600 秒 | 缓存有效期 |
+`codex-rs/connectors` 是一个职责单一、设计清晰的模块，专注于连接器目录数据的获取、缓存和规范化。其核心设计特点：
+
+1. **依赖注入 HTTP 层**：通过 `fetch_page` 回调解耦 HTTP 实现，便于测试和复用
+2. **智能合并策略**：字段级合并确保元数据完整性
+3. **简洁缓存机制**：全局静态缓存 + TTL 过期策略
+4. **零外部状态**：纯函数式设计，易于推理和测试
+
+该模块在架构上位于数据获取层（codex-chatgpt）和协议定义层（app-server-protocol）之间，是整个连接器生态系统的数据源头。

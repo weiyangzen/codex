@@ -199,7 +199,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/config
 - [x] [DIR] codex-rs/config/src
 - [x] [DIR] codex-rs/connectors
-- [ ] [DIR] codex-rs/connectors/src
+- [x] [DIR] codex-rs/connectors/src
 - [ ] [DIR] codex-rs/core
 - [ ] [DIR] codex-rs/core/src
 - [ ] [DIR] codex-rs/core/src/agent
