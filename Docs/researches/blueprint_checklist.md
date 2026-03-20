@@ -1718,11 +1718,11 @@ Legend: `[ ]` pending, `[x]` researched.
 - [ ] [FILE] codex-rs/core/src/connectors.rs
 - [ ] [FILE] codex-rs/core/src/connectors_tests.rs
 - [ ] [FILE] codex-rs/core/src/consequential_tool_message_templates.json
-- [ ] [FILE] codex-rs/core/src/context_manager/history.rs
-- [ ] [FILE] codex-rs/core/src/context_manager/history_tests.rs
-- [ ] [FILE] codex-rs/core/src/context_manager/mod.rs
-- [ ] [FILE] codex-rs/core/src/context_manager/normalize.rs
-- [ ] [FILE] codex-rs/core/src/context_manager/updates.rs
+- [x] [FILE] codex-rs/core/src/context_manager/history.rs
+- [x] [FILE] codex-rs/core/src/context_manager/history_tests.rs
+- [x] [FILE] codex-rs/core/src/context_manager/mod.rs
+- [x] [FILE] codex-rs/core/src/context_manager/normalize.rs
+- [x] [FILE] codex-rs/core/src/context_manager/updates.rs
 - [ ] [FILE] codex-rs/core/src/contextual_user_message.rs
 - [ ] [FILE] codex-rs/core/src/contextual_user_message_tests.rs
 - [ ] [FILE] codex-rs/core/src/custom_prompts.rs
