@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-20 09:46:17 +0800
+Generated at: 2026-03-20 09:56:01 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -120,7 +120,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails/input
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/012_delete_directory_fails/input/dir
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/013_rejects_invalid_hunk_header
-- [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/013_rejects_invalid_hunk_header/expected
+- [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/013_rejects_invalid_hunk_header/expected
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/013_rejects_invalid_hunk_header/input
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/014_update_file_appends_trailing_newline
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/014_update_file_appends_trailing_newline/expected
