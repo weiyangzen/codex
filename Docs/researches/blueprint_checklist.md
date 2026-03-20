@@ -201,7 +201,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/connectors
 - [x] [DIR] codex-rs/connectors/src
 - [x] [DIR] codex-rs/core
-- [ ] [DIR] codex-rs/core/src
+- [x] [DIR] codex-rs/core/src
 - [ ] [DIR] codex-rs/core/src/agent
 - [ ] [DIR] codex-rs/core/src/agent/builtins
 - [ ] [DIR] codex-rs/core/src/apps
