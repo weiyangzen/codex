@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-20 12:41:02 +0800
+Generated at: 2026-03-20 12:51:02 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -139,7 +139,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/019_unicode_simple
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/019_unicode_simple/expected
 - [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/019_unicode_simple/input
-- [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/020_delete_file_success
+- [x] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/020_delete_file_success
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/020_delete_file_success/expected
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/020_delete_file_success/input
 - [ ] [DIR] codex-rs/apply-patch/tests/fixtures/scenarios/020_whitespace_padded_patch_marker_lines
