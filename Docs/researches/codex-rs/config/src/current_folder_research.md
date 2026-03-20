@@ -1,8 +1,8 @@
-# DIR Research: codex-rs/config/src
+# DIR codex-rs/config/src 研究文档
 
 ## 概述
 
-`codex-rs/config/src` 是 Codex 项目的配置管理核心库，负责处理多层级配置加载、约束验证、需求管理和配置合并。该 crate 名为 `codex-config`，为整个 Codex 系统提供统一的配置管理能力。
+`codex-rs/config/src` 是 Codex 项目的配置管理核心库 (`codex-config`) 的源代码目录。该 crate 负责处理多层配置加载、约束验证、需求管理和配置合并等关键功能。它是连接用户配置、系统策略和管理需求的核心枢纽。
 
 ---
 
@@ -10,243 +10,305 @@
 
 ### 核心场景
 
-1. **多层级配置管理**：支持从系统级、用户级到项目级的多层配置叠加
-2. **企业级需求约束**：通过 `requirements.toml` 实现管理员对用户的配置限制
-3. **云配置动态加载**：支持从云端动态获取配置要求
-4. **配置验证与诊断**：提供详细的配置错误定位和友好的错误提示
-5. **执行策略管理**：定义命令执行的前缀规则和安全策略
+1. **多层配置管理**
+   - 支持从多个来源加载配置（系统、用户、项目、CLI 覆盖、云端需求等）
+   - 实现配置层级的优先级排序和合并
+   - 处理配置的溯源（provenance）追踪
+
+2. **企业级策略约束**
+   - 通过 `requirements.toml` 实现管理员对 Codex 行为的强制约束
+   - 支持云托管策略（Cloud Requirements）
+   - 支持 MDM（移动设备管理）托管配置
+   - 支持传统 `managed_config.toml` 向后兼容
+
+3. **配置验证与错误处理**
+   - 提供详细的配置错误定位和格式化
+   - 支持 TOML 解析错误的精确行号/列号报告
+   - 实现配置值的约束验证框架
+
+4. **执行策略（Exec Policy）**
+   - 定义命令执行的前缀规则匹配
+   - 支持允许/提示/禁止三种决策模式
+   - 与企业安全策略集成
 
 ### 主要职责
 
-- 配置层（ConfigLayer）的定义与管理
-- 配置需求（ConfigRequirements）的解析与验证
-- 配置值约束（Constrained）的实现
-- 配置合并与覆盖逻辑
-- 配置错误诊断与格式化
-- 云配置异步加载抽象
+| 职责 | 说明 |
+|------|------|
+| 配置层管理 | 管理不同来源的配置层，处理优先级和合并 |
+| 需求约束 | 解析和强制执行管理员定义的策略约束 |
+| 错误诊断 | 提供用户友好的配置错误报告 |
+| 执行策略 | 定义命令执行的允许/拒绝规则 |
+| 溯源追踪 | 记录每个配置值的来源，支持审计 |
 
 ---
 
 ## 功能点目的
 
-### 1. 配置状态管理 (`state.rs`)
+### 1. 配置层栈（ConfigLayerStack）
 
-**目的**：管理配置层的堆栈结构，维护配置的层级关系和优先级。
-
-**关键功能**：
-- `ConfigLayerEntry`：单个配置层的表示，包含配置来源、原始TOML、版本指纹
-- `ConfigLayerStack`：配置层堆栈，管理从低到高优先级的所有配置层
-- `ConfigLayerStackOrdering`：配置层排序枚举（低优先级优先或高优先级优先）
-- `LoaderOverrides`：用于测试的配置加载覆盖项
+**目的**：管理来自不同来源的配置层，确保正确的优先级和合并行为。
 
 **配置层优先级**（从低到高）：
-1. System (`/etc/codex/config.toml`)
-2. User (`~/.codex/config.toml`)
-3. Project (`.codex/config.toml` 从根目录到CWD)
-4. SessionFlags (CLI覆盖)
-5. LegacyManagedConfig (向后兼容)
+```
+MDM (0) → System (10) → User (20) → Project (25) → SessionFlags (30) → LegacyManagedConfigFromFile (40) → LegacyManagedConfigFromMdm (50)
+```
 
-### 2. 配置需求管理 (`config_requirements.rs`)
+**关键特性**：
+- 每层配置都有唯一的 `ConfigLayerSource` 标识
+- 支持禁用层（disabled layers）并记录禁用原因
+- 提供 `effective_config()` 方法合并所有层
+- 提供 `origins()` 方法追踪每个配置字段的来源
 
-**目的**：定义和管理管理员强制要求的配置约束，确保企业安全策略的执行。
+### 2. 需求约束系统（ConfigRequirements）
 
-**关键类型**：
-- `ConfigRequirements`：归一化后的配置需求，包含约束值
-- `ConfigRequirementsToml`：从TOML反序列化的原始需求配置
-- `ConfigRequirementsWithSources`：带来源信息的需求配置
-- `RequirementSource`：需求来源枚举（MDM、云端、系统文件等）
+**目的**：允许管理员通过 `requirements.toml` 强制约束用户可配置的范围。
 
 **支持的约束类型**：
-- `allowed_approval_policies`：允许的审批策略列表
-- `allowed_sandbox_modes`：允许的沙盒模式列表
-- `allowed_web_search_modes`：允许的网络搜索模式
-- `feature_requirements`：功能开关要求
-- `mcp_servers`：MCP服务器白名单
-- `apps`：应用启用/禁用配置
-- `rules`：执行策略规则
-- `enforce_residency`：数据驻留要求
-- `experimental_network`：实验性网络配置
+- `approval_policy`: 限制可用的审批策略（如仅允许 `on-request`）
+- `sandbox_policy`: 限制可用的沙箱模式
+- `web_search_mode`: 限制网络搜索模式
+- `feature_requirements`: 功能开关的强制启用/禁用
+- `mcp_servers`: MCP 服务器的允许列表
+- `exec_policy`: 命令执行的前缀规则
+- `enforce_residency`: 数据驻留要求（如强制 US）
+- `network`: 网络代理和访问控制
 
-### 3. 约束系统 (`constraint.rs`)
+**约束机制**：
+- 使用 `Constrained<T>` 包装器封装约束逻辑
+- 支持验证器（validator）和规范化器（normalizer）
+- 约束违规时提供详细的错误信息，包括约束来源
 
-**目的**：提供运行时值约束机制，确保配置值符合管理员定义的规则。
+### 3. 执行策略（RequirementsExecPolicy）
 
-**核心设计**：
-- `Constrained<T>`：包装类型，包含值、验证器和可选的归一化器
-- `ConstraintError`：约束错误类型，包含字段名、候选值、允许值和来源
-- `ConstraintResult<T>`：约束操作结果类型别名
+**目的**：提供细粒度的命令执行控制，基于命令前缀匹配决定允许、提示或禁止执行。
 
-**验证模式**：
-- `allow_any`：允许任何值（无约束）
-- `allow_only`：仅允许特定值
-- `allow_any_from_default`：使用默认值，允许任何值
-- `normalized`：带归一化函数的约束
-
-### 4. 配置合并 (`merge.rs`)
-
-**目的**：实现TOML值的深度合并，高优先级配置覆盖低优先级配置。
-
-**核心函数**：
-```rust
-pub fn merge_toml_values(base: &mut TomlValue, overlay: &TomlValue)
+**规则结构**：
+```toml
+[rules]
+prefix_rules = [
+    { pattern = [{ token = "rm" }], decision = "forbidden", justification = "删除命令被禁止" },
+    { pattern = [{ token = "git" }, { token = "push" }], decision = "prompt", justification = "推送代码需要确认" },
+]
 ```
 
-**合并规则**：
-- 表（Table）类型：递归合并，overlay的键覆盖base的键
-- 其他类型：直接用overlay的值替换
+**决策类型**：
+- `Allow`: 允许执行（在 requirements.toml 中不允许，使用最宽松策略）
+- `Prompt`: 需要用户确认
+- `Forbidden`: 禁止执行
 
-### 5. CLI覆盖处理 (`overrides.rs`)
+### 4. 配置错误诊断（diagnostics）
 
-**目的**：处理命令行传入的点分路径配置覆盖。
+**目的**：将 TOML 解析错误转换为用户友好的、带有精确位置信息的错误报告。
 
-**核心函数**：
-```rust
-pub fn build_cli_overrides_layer(cli_overrides: &[(String, TomlValue)]) -> TomlValue
-```
+**功能**：
+- 将字节偏移转换为行号/列号
+- 使用 `serde_path_to_error` 提供详细的反序列化错误路径
+- 支持 `toml_edit` 进行精确的 AST 定位
+- 格式化错误输出，包含源代码上下文和错误标记
 
-**功能**：将形如 `[("model", "gpt-4"), ("features.apps", true)]` 的覆盖转换为嵌套TOML表。
+### 5. 云端需求加载（CloudRequirementsLoader）
 
-### 6. 错误诊断 (`diagnostics.rs`)
-
-**目的**：提供详细的配置错误定位和友好的错误显示。
-
-**关键类型**：
-- `ConfigError`：配置错误，包含路径、文本范围和消息
-- `TextRange`/`TextPosition`：1-based的行列位置信息
-- `ConfigLoadError`：包装ConfigError和原始TOML错误
-
-**核心功能**：
-- `config_error_from_toml`：从TOML解析错误创建ConfigError
-- `config_error_from_typed_toml`：使用serde_path_to_error定位类型错误
-- `format_config_error`：格式化错误显示（带源代码高亮）
-- `first_layer_config_error`：在配置层堆栈中查找第一个具体错误
-
-### 7. 云配置加载 (`cloud_requirements.rs`)
-
-**目的**：抽象云端配置需求的异步加载，支持缓存和共享。
-
-**核心设计**：
-- `CloudRequirementsLoader`：基于`Shared<BoxFuture>`的异步加载器
-- `CloudRequirementsLoadError`：加载错误，包含错误码、消息和HTTP状态码
-- `CloudRequirementsLoadErrorCode`：错误码枚举（Auth、Timeout、Parse等）
+**目的**：支持从云端动态加载策略配置，实现集中式策略管理。
 
 **特性**：
-- 使用`Shared` future确保多次调用只执行一次实际请求
-- 支持克隆和共享加载结果
-
-### 8. 执行策略 (`requirements_exec_policy.rs`)
-
-**目的**：将TOML定义的执行规则转换为内部策略表示。
-
-**关键类型**：
-- `RequirementsExecPolicy`：包装`codex_execpolicy::Policy`
-- `RequirementsExecPolicyToml`：TOML表示的前缀规则列表
-- `RequirementsExecPolicyPrefixRuleToml`：前缀规则定义
-- `RequirementsExecPolicyPatternTokenToml`：模式令牌（单值或多选）
-- `RequirementsExecPolicyDecisionToml`：决策枚举（Allow/Prompt/Forbidden）
-
-**转换流程**：
-1. 验证`prefix_rules`非空
-2. 解析每个规则的pattern为`PatternToken`
-3. 验证决策不为`Allow`（要求使用更严格的Prompt/Forbidden）
-4. 构建`MultiMap<program, RuleRef>`索引
-5. 创建`Policy`实例
-
-### 9. 配置指纹 (`fingerprint.rs`)
-
-**目的**：为配置内容生成唯一版本标识，用于缓存和变更检测。
-
-**核心函数**：
-```rust
-pub fn version_for_toml(value: &TomlValue) -> String
-```
-
-**实现**：
-- 将TOML转换为JSON
-- 对JSON进行规范化排序（键按字母顺序）
-- 计算SHA256哈希
-- 返回`sha256:<hex>`格式字符串
-
-**来源追踪**：
-```rust
-pub(super) fn record_origins(
-    value: &TomlValue,
-    meta: &ConfigLayerMetadata,
-    path: &mut Vec<String>,
-    origins: &mut HashMap<String, ConfigLayerMetadata>,
-)
-```
-递归记录每个配置项的来源层元数据。
+- 使用 `Shared<BoxFuture>` 确保并发安全且只执行一次
+- 支持异步加载和缓存
+- 提供标准化的错误类型（`CloudRequirementsLoadError`）
 
 ---
 
 ## 具体技术实现
 
+### 关键数据结构
+
+#### ConfigLayerEntry
+```rust
+pub struct ConfigLayerEntry {
+    pub name: ConfigLayerSource,       // 配置层来源
+    pub config: TomlValue,             // 配置内容
+    pub raw_toml: Option<String>,      // 原始 TOML 文本
+    pub version: String,               // 内容哈希（sha256）
+    pub disabled_reason: Option<String>, // 禁用原因
+}
+```
+
+#### ConfigLayerStack
+```rust
+pub struct ConfigLayerStack {
+    layers: Vec<ConfigLayerEntry>,              // 配置层列表
+    user_layer_index: Option<usize>,            // 用户层索引
+    requirements: ConfigRequirements,           // 强制约束
+    requirements_toml: ConfigRequirementsToml,  // 原始需求配置
+}
+```
+
+#### Constrained<T>
+```rust
+pub struct Constrained<T> {
+    value: T,
+    validator: Arc<dyn Fn(&T) -> ConstraintResult<()> + Send + Sync>,
+    normalizer: Option<Arc<dyn Fn(T) -> T + Send + Sync>>,
+}
+```
+
+#### ConfigRequirements
+```rust
+pub struct ConfigRequirements {
+    pub approval_policy: ConstrainedWithSource<AskForApproval>,
+    pub sandbox_policy: ConstrainedWithSource<SandboxPolicy>,
+    pub web_search_mode: ConstrainedWithSource<WebSearchMode>,
+    pub feature_requirements: Option<Sourced<FeatureRequirementsToml>>,
+    pub mcp_servers: Option<Sourced<BTreeMap<String, McpServerRequirement>>>,
+    pub exec_policy: Option<Sourced<RequirementsExecPolicy>>,
+    pub enforce_residency: ConstrainedWithSource<Option<ResidencyRequirement>>,
+    pub network: Option<Sourced<NetworkConstraints>>,
+}
+```
+
 ### 关键流程
 
-#### 配置加载流程
+#### 1. 配置加载流程
 
 ```
 load_config_layers_state()
 ├── 加载云端需求 (CloudRequirementsLoader)
-├── 加载macOS托管需求 (MDM)
-├── 加载系统requirements.toml
-├── 加载遗留managed_config.toml作为需求
-├── 构建CLI覆盖层
-├── 加载系统config.toml → ConfigLayerEntry
-├── 加载用户config.toml → ConfigLayerEntry
-├── 加载项目层config.toml（从CWD向上到项目根）
-│   └── 根据信任上下文决定是否禁用
-├── 添加CLI覆盖层
-├── 添加遗留managed_config层
-└── 创建ConfigLayerStack
-    ├── 验证层顺序
-    └── 转换需求为ConfigRequirements
+├── 加载 macOS MDM 托管配置 (仅限 macOS)
+├── 加载系统 requirements.toml
+├── 加载传统 managed_config.toml
+├── 构建 CLI 覆盖层
+├── 加载系统 config.toml
+├── 加载用户 config.toml
+├── 加载项目层（根据信任上下文）
+│   └── 从 cwd 向上遍历到 project_root
+│       └── 每个 .codex/ 目录作为一个层
+├── 添加 CLI 覆盖层
+├── 添加传统托管配置层
+└── 构建 ConfigLayerStack
+    └── 验证层顺序和约束
 ```
 
-#### 配置合并流程
-
-```
-ConfigLayerStack::effective_config()
-├── 初始化空TOML表
-├── 按优先级顺序遍历配置层（低到高）
-│   └── merge_toml_values(&mut merged, &layer.config)
-│       ├── 如果都是Table：递归合并
-│       └── 否则：用overlay替换base
-└── 返回合并后的TOML值
-```
-
-#### 需求验证流程
-
-```
-ConfigRequirements::try_from(ConfigRequirementsWithSources)
-├── 转换allowed_approval_policies → Constrained<AskForApproval>
-├── 转换allowed_sandbox_modes → Constrained<SandboxPolicy>
-│   └── 验证包含"read-only"（Codex运行必需）
-├── 转换allowed_web_search_modes → Constrained<WebSearchMode>
-│   └── 自动插入"disabled"选项
-├── 转换rules → RequirementsExecPolicy
-└── 转换其他字段...
-```
-
-#### 错误定位流程
-
-```
-first_layer_config_error()
-├── 遍历配置层（低到高优先级）
-├── 读取每层原始TOML文件
-├── 使用serde_path_to_error反序列化
-│   └── 捕获路径提示和原始错误
-├── 使用toml_edit定位错误span
-│   └── 特殊处理features表
-└── 返回第一个具体错误
-```
-
-### 关键数据结构
-
-#### 配置层来源 (`ConfigLayerSource`)
+#### 2. 配置合并流程
 
 ```rust
+// merge.rs
+pub fn merge_toml_values(base: &mut TomlValue, overlay: &TomlValue) {
+    // 如果两者都是表，递归合并
+    // 否则，overlay 完全替换 base
+}
+```
+
+合并规则：
+- 表（Table）类型递归合并
+- 非表类型直接覆盖
+- 数组类型直接替换（不支持数组合并）
+
+#### 3. 约束验证流程
+
+```rust
+// constraint.rs
+impl<T: Send + Sync> Constrained<T> {
+    pub fn new(
+        initial_value: T,
+        validator: impl Fn(&T) -> ConstraintResult<()> + Send + Sync + 'static,
+    ) -> ConstraintResult<Self> {
+        // 1. 验证初始值
+        // 2. 创建 Constrained 实例
+    }
+
+    pub fn set(&mut self, value: T) -> ConstraintResult<()> {
+        // 1. 应用规范化器（如果有）
+        // 2. 运行验证器
+        // 3. 如果通过，更新值
+    }
+}
+```
+
+#### 4. 错误定位流程
+
+```rust
+// diagnostics.rs
+pub fn config_error_from_typed_toml<T: DeserializeOwned>(
+    path: impl AsRef<Path>,
+    contents: &str,
+) -> Option<ConfigError> {
+    // 1. 使用 serde_path_to_error 获取错误路径
+    // 2. 使用 toml_edit 定位路径对应的 span
+    // 3. 转换为 TextRange（行号/列号）
+    // 4. 构建 ConfigError
+}
+```
+
+#### 5. 执行策略匹配流程
+
+```rust
+// requirements_exec_policy.rs
+impl RequirementsExecPolicyToml {
+    pub fn to_policy(&self) -> Result<Policy, RequirementsExecPolicyParseError> {
+        // 1. 验证 prefix_rules 非空
+        // 2. 遍历每个规则：
+        //    - 验证 pattern 非空
+        //    - 验证 justification 非空
+        //    - 验证 decision 存在且不为 Allow
+        //    - 解析 pattern tokens
+        // 3. 构建 Policy（按首个 token 索引的规则映射）
+    }
+}
+```
+
+### 协议与接口
+
+#### 对外暴露的主要类型（lib.rs）
+
+```rust
+// 配置层管理
+pub use state::ConfigLayerEntry;
+pub use state::ConfigLayerStack;
+pub use state::ConfigLayerStackOrdering;
+pub use state::LoaderOverrides;
+
+// 需求约束
+pub use config_requirements::ConfigRequirements;
+pub use config_requirements::ConfigRequirementsToml;
+pub use config_requirements::ConfigRequirementsWithSources;
+pub use config_requirements::RequirementSource;
+pub use config_requirements::Sourced;
+pub use config_requirements::ConstrainedWithSource;
+
+// 约束框架
+pub use constraint::Constrained;
+pub use constraint::ConstraintError;
+pub use constraint::ConstraintResult;
+
+// 错误诊断
+pub use diagnostics::ConfigError;
+pub use diagnostics::ConfigLoadError;
+pub use diagnostics::TextPosition;
+pub use diagnostics::TextRange;
+pub use diagnostics::format_config_error;
+pub use diagnostics::format_config_error_with_source;
+
+// 云端需求
+pub use cloud_requirements::CloudRequirementsLoader;
+pub use cloud_requirements::CloudRequirementsLoadError;
+pub use cloud_requirements::CloudRequirementsLoadErrorCode;
+
+// 执行策略
+pub use requirements_exec_policy::RequirementsExecPolicy;
+pub use requirements_exec_policy::RequirementsExecPolicyToml;
+
+// 配置合并与覆盖
+pub use merge::merge_toml_values;
+pub use overrides::build_cli_overrides_layer;
+pub use fingerprint::version_for_toml;
+```
+
+#### 与 app-server-protocol 的集成
+
+`ConfigLayerSource` 和 `ConfigLayer` 类型定义在 `app-server-protocol` crate 中，被 `codex-config` 广泛使用：
+
+```rust
+// 来自 app-server-protocol/src/protocol/v2.rs
 pub enum ConfigLayerSource {
     Mdm { domain: String, key: String },
     System { file: AbsolutePathBuf },
@@ -258,196 +320,208 @@ pub enum ConfigLayerSource {
 }
 ```
 
-#### 带来源的约束值 (`ConstrainedWithSource<T>`)
-
-```rust
-pub struct ConstrainedWithSource<T> {
-    pub value: Constrained<T>,
-    pub source: Option<RequirementSource>,
-}
-```
-
-#### 网络约束 (`NetworkConstraints`)
-
-```rust
-pub struct NetworkConstraints {
-    pub enabled: Option<bool>,
-    pub http_port: Option<u16>,
-    pub socks_port: Option<u16>,
-    pub allow_upstream_proxy: Option<bool>,
-    pub dangerously_allow_non_loopback_proxy: Option<bool>,
-    pub dangerously_allow_all_unix_sockets: Option<bool>,
-    pub allowed_domains: Option<Vec<String>>,
-    pub managed_allowed_domains_only: Option<bool>,
-    pub denied_domains: Option<Vec<String>>,
-    pub allow_unix_sockets: Option<Vec<String>>,
-    pub allow_local_binding: Option<bool>,
-}
-```
-
-### 协议与接口
-
-#### 与app-server-protocol的集成
-
-- `ConfigLayer`/`ConfigLayerMetadata`：来自`codex_app_server_protocol`
-- 配置层元数据用于API响应，展示配置来源和版本
-- `ConfigRequirementsRead` API端点暴露需求配置
-
-#### 与codex_execpolicy的集成
-
-- `RequirementsExecPolicy`包装`codex_execpolicy::Policy`
-- TOML规则转换为`PrefixRule`和`PatternToken`
-- 支持决策：Allow、Prompt、Forbidden
-
 ---
 
 ## 关键代码路径与文件引用
 
-### 核心文件
+### 源文件结构
 
-| 文件 | 行数 | 职责 |
+| 文件 | 功能 | 行数 |
 |------|------|------|
-| `lib.rs` | 58 | 模块导出和公共API定义 |
-| `state.rs` | 331 | 配置层堆栈管理 |
-| `config_requirements.rs` | 1624 | 需求定义、解析和验证 |
-| `constraint.rs` | 278 | 值约束系统 |
-| `diagnostics.rs` | 397 | 错误诊断和格式化 |
-| `merge.rs` | 18 | TOML值合并 |
-| `overrides.rs` | 55 | CLI覆盖处理 |
-| `cloud_requirements.rs` | 105 | 云配置异步加载 |
-| `requirements_exec_policy.rs` | 236 | 执行策略规则 |
-| `fingerprint.rs` | 67 | 配置版本指纹 |
+| `lib.rs` | 模块导出和公共接口定义 | 58 |
+| `state.rs` | 配置层状态管理（ConfigLayerStack, ConfigLayerEntry） | 331 |
+| `config_requirements.rs` | 需求约束定义和转换（ConfigRequirements, ConfigRequirementsToml） | 1623 |
+| `constraint.rs` | 约束验证框架（Constrained, ConstraintError） | 278 |
+| `diagnostics.rs` | 配置错误诊断和格式化 | 397 |
+| `cloud_requirements.rs` | 云端需求加载器 | 105 |
+| `requirements_exec_policy.rs` | 执行策略定义和解析 | 236 |
+| `merge.rs` | TOML 值合并逻辑 | 18 |
+| `overrides.rs` | CLI 覆盖层构建 | 55 |
+| `fingerprint.rs` | 配置内容版本指纹（SHA256） | 67 |
 
 ### 关键代码路径
 
-1. **配置加载入口**：
-   - `codex-rs/core/src/config_loader/mod.rs:114` - `load_config_layers_state()`
-   - 调用 `codex_config::ConfigLayerStack::new()`
+#### 配置加载入口
+```
+core/src/config_loader/mod.rs:load_config_layers_state()
+├── 调用 codex_config::CloudRequirementsLoader
+├── 调用 codex_config::ConfigRequirementsWithSources::merge_unset_fields()
+└── 构建 codex_config::ConfigLayerStack
+```
 
-2. **配置合并**：
-   - `state.rs:218-227` - `effective_config()`
-   - `merge.rs:4-18` - `merge_toml_values()`
+#### 约束应用路径
+```
+core/src/config/mod.rs:Config::load_config_with_layer_stack()
+├── 使用 ConfigRequirements 验证配置值
+├── 调用 Constrained::set() 应用用户配置
+└── 处理 ConstraintError 并生成启动警告
+```
 
-3. **需求验证**：
-   - `config_requirements.rs:492-692` - `TryFrom<ConfigRequirementsWithSources>`
-   - `constraint.rs:57-69` - `Constrained::new()`
-
-4. **错误诊断**：
-   - `diagnostics.rs:137-152` - `first_layer_config_error()`
-   - `diagnostics.rs:219-253` - `format_config_error()`
-
-5. **云配置加载**：
-   - `cloud_requirements.rs:48-70` - `CloudRequirementsLoader`
-   - `codex-rs/core/src/config_loader/mod.rs:123-126` - 集成点
+#### 错误报告路径
+```
+core/src/config_loader/mod.rs:first_layer_config_error()
+├── 调用 codex_config::first_layer_config_error::<ConfigToml>()
+├── diagnostics.rs:config_error_from_typed_toml()
+└── 格式化并返回 ConfigError
+```
 
 ---
 
 ## 依赖与外部交互
 
-### 内部依赖
+### 内部依赖（Workspace）
 
 | Crate | 用途 |
 |-------|------|
-| `codex-app-server-protocol` | `ConfigLayer`, `ConfigLayerSource`, `ConfigLayerMetadata` 类型 |
-| `codex-execpolicy` | 执行策略`Policy`、`PrefixRule`、`PatternToken` |
-| `codex-protocol` | `SandboxMode`, `WebSearchMode`, `AskForApproval`, `SandboxPolicy` |
-| `codex-utils-absolute-path` | `AbsolutePathBuf`, `AbsolutePathBufGuard` |
+| `codex-app-server-protocol` | ConfigLayerSource, ConfigLayer, ConfigLayerMetadata 类型定义 |
+| `codex-execpolicy` | Policy, Decision, Rule 等执行策略类型 |
+| `codex-protocol` | AskForApproval, SandboxPolicy, WebSearchMode 等配置类型 |
+| `codex-utils-absolute-path` | AbsolutePathBuf 路径处理 |
 
 ### 外部依赖
 
 | Crate | 用途 |
 |-------|------|
-| `serde`/`serde_json` | 序列化/反序列化 |
-| `toml`/`toml_edit` | TOML解析和编辑（含span信息） |
-| `serde_path_to_error` | 路径感知的反序列化错误 |
-| `sha2` | 配置指纹哈希 |
+| `serde` / `serde_json` | 序列化/反序列化 |
+| `toml` / `toml_edit` | TOML 解析和编辑（保留注释和格式） |
+| `sha2` | 配置内容指纹（SHA256） |
 | `thiserror` | 错误类型定义 |
-| `tokio` | 异步文件操作 |
-| `futures` | `Shared` future用于云配置 |
-| `multimap` | 执行策略规则索引 |
-| `tracing` | 日志记录 |
+| `futures` | 异步 Future 处理（CloudRequirementsLoader） |
+| `tokio` | 异步文件 I/O |
+| `multimap` | 执行策略的多值映射 |
+| `serde_path_to_error` | 详细的反序列化错误路径 |
 
-### 调用方
+### 调用方（谁使用 codex-config）
 
-- `codex-rs/core/src/config_loader/mod.rs` - 主要调用者，实现完整配置加载流程
-- `codex-rs/core/src/config/mod.rs` - 使用`ConfigLayerStack`构建最终`Config`
-- `codex-rs/app-server/src/config_api.rs` - 暴露配置API
+1. **codex-core** (`core/src/config_loader/`)
+   - 主要调用方，负责实际的配置加载流程
+   - 使用 ConfigLayerStack 管理配置层
+   - 应用 ConfigRequirements 约束
+
+2. **codex-cli** (`cli/`)
+   - 命令行工具使用配置加载功能
+
+3. **codex-hooks** (`hooks/`)
+   - 钩子系统使用配置进行功能开关控制
 
 ---
 
 ## 风险、边界与改进建议
 
-### 风险点
+### 已知风险
 
-1. **配置层顺序验证**：
-   - `verify_layer_ordering()`在`ConfigLayerStack::new()`中调用
-   - 如果层顺序错误会返回`InvalidData`错误
-   - 项目层必须从根到CWD顺序排列
+1. **配置层顺序验证**
+   - `verify_layer_ordering()` 确保层按优先级排序
+   - 如果层顺序错误，会返回 `InvalidData` 错误
+   - 项目层必须从根目录到 cwd 排序
 
-2. **沙盒模式约束**：
-   - `allowed_sandbox_modes`必须包含`read-only`
-   - 否则`ConfigRequirements`转换会失败
-   - 这是Codex运行的硬性要求
+2. **约束验证失败处理**
+   - 当用户配置违反约束时，会回退到约束允许的值
+   - 可能产生启动警告，但不会影响启动
+   - 见 `apply_requirement_constrained_value()`
 
-3. **云配置加载失败**：
-   - 云配置加载错误不会阻止配置加载
-   - 但会记录警告，可能导致安全策略未生效
+3. **传统配置兼容性**
+   - 支持 `managed_config.toml` 向后兼容
+   - 转换逻辑在 `LegacyManagedConfigToml::into()` 中
+   - 风险：传统配置可能包含未映射的字段
 
-4. **路径解析安全**：
-   - 使用`AbsolutePathBufGuard`确保相对路径正确解析
-   - 忘记设置guard可能导致路径解析错误
+4. **云端需求加载失败**
+   - `CloudRequirementsLoader` 使用 `Shared` Future 确保只加载一次
+   - 如果加载失败，错误会被缓存并返回给所有调用者
+   - 默认实现返回 `Ok(None)`
 
 ### 边界情况
 
-1. **空配置层**：
-   - 支持不存在的配置文件（使用空表）
-   - `load_config_toml_for_required_layer()`处理`NotFound`错误
+1. **空配置处理**
+   - 所有配置层都可能返回空表（文件不存在）
+   - `effective_config()` 会正确合并空表
 
-2. **禁用配置层**：
-   - 项目层可因信任问题被禁用
-   - `ConfigLayerEntry::new_disabled()`创建禁用层
-   - 禁用层不参与合并但保留在堆栈中
+2. **循环依赖**
+   - 配置加载不涉及循环依赖检测
+   - 项目层遍历使用目录祖先链，天然无循环
 
-3. **遗留配置迁移**：
-   - `LegacyManagedConfigToml`自动转换为`ConfigRequirementsToml`
-   - 确保`read-only`沙盒模式始终被允许
+3. **并发安全**
+   - `Constrained<T>` 使用 `Arc` 包装验证器，支持 `Send + Sync`
+   - `CloudRequirementsLoader` 使用 `Shared` Future 确保线程安全
 
-4. **TOML合并边界**：
-   - 数组类型不被合并，直接替换
-   - 只有Table类型递归合并
+4. **路径解析**
+   - 相对路径在配置加载时解析为绝对路径
+   - 使用 `AbsolutePathBufGuard` 确保解析上下文正确
 
 ### 改进建议
 
-1. **性能优化**：
-   - 云配置加载使用`Shared` future避免重复请求
-   - 考虑为配置指纹添加缓存
+1. **配置验证增强**
+   - 添加更多的静态验证（如检查冲突的配置组合）
+   - 考虑使用 JSON Schema 验证配置结构
 
-2. **错误体验**：
-   - 当前错误信息已较友好，可考虑添加修复建议
-   - 对于约束错误，可提示用户如何修改requirements.toml
+2. **性能优化**
+   - `effective_config()` 每次调用都重新合并，可以考虑缓存
+   - `origins()` 遍历所有层，对于大型配置可能较慢
 
-3. **功能扩展**：
-   - 考虑支持配置热重载（监听文件变化）
-   - 添加配置变更通知机制
+3. **错误报告改进**
+   - 当前错误报告只显示第一个错误，可以支持多错误报告
+   - 可以添加配置建议（如"您是否想设置 xxx？"）
 
-4. **测试覆盖**：
-   - `config_requirements.rs`包含约900行测试代码
-   - 建议添加更多边界情况测试（如循环引用、超大配置）
+4. **测试覆盖**
+   - 增加对云端需求加载失败的测试
+   - 增加对 MDM 配置加载的测试（需要模拟 macOS 环境）
 
-5. **文档完善**：
-   - 添加更多配置示例
-   -  documenting 各配置层的优先级规则
+5. **文档改进**
+   - 添加更多关于 `requirements.toml` 格式的示例
+   -  documenting 配置层优先级的决策流程
+
+6. **API 简化**
+   - `ConfigRequirementsWithSources` 和 `ConfigRequirements` 的转换可以简化
+   - 考虑使用 derive 宏减少样板代码
 
 ---
 
-## 总结
+## 附录：配置示例
 
-`codex-rs/config/src`是Codex项目的配置管理基石，通过清晰的分层架构实现了：
+### requirements.toml 示例
 
-1. **灵活的多层配置**：支持系统、用户、项目、CLI等多层配置叠加
-2. **企业级安全控制**：通过requirements.toml实现管理员约束
-3. **友好的错误体验**：详细的错误定位和格式化
-4. **云原生支持**：异步云配置加载
-5. **向后兼容**：支持遗留managed_config.toml格式
+```toml
+# 限制审批策略
+allowed_approval_policies = ["on-request", "unless-trusted"]
 
-该模块设计良好，职责清晰，测试覆盖充分，为整个Codex系统提供了可靠的配置管理能力。
+# 限制沙箱模式
+allowed_sandbox_modes = ["read-only", "workspace-write"]
+
+# 禁用网络搜索
+allowed_web_search_modes = ["disabled"]
+
+# 功能开关
+[features]
+personality = false
+
+# MCP 服务器白名单
+[mcp_servers.docs]
+identity = { command = "codex-mcp" }
+
+# 执行策略
+[rules]
+prefix_rules = [
+    { pattern = [{ token = "rm" }], decision = "forbidden", justification = "删除命令被禁止" },
+]
+
+# 数据驻留
+enforce_residency = "us"
+
+# 网络配置
+[experimental_network]
+enabled = true
+allowed_domains = ["api.openai.com"]
+```
+
+### 配置层溯源示例
+
+```rust
+let stack = load_config_layers_state(...).await?;
+let origins = stack.origins();
+// origins["model"] = ConfigLayerMetadata { name: ConfigLayerSource::User { ... }, version: "sha256:..." }
+```
+
+---
+
+*文档生成时间：2026-03-21*
+*基于 codex-rs/config/src 代码分析*
