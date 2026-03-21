@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-21 11:46:01 +0800
+Generated at: 2026-03-21 11:56:01 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -311,7 +311,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/otel
 - [x] [DIR] codex-rs/otel/src
 - [x] [DIR] codex-rs/otel/src/events
-- [ ] [DIR] codex-rs/otel/src/metrics
+- [x] [DIR] codex-rs/otel/src/metrics
 - [ ] [DIR] codex-rs/otel/tests
 - [ ] [DIR] codex-rs/otel/tests/harness
 - [ ] [DIR] codex-rs/otel/tests/suite
