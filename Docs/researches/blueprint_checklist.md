@@ -309,7 +309,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/ollama
 - [x] [DIR] codex-rs/ollama/src
 - [x] [DIR] codex-rs/otel
-- [ ] [DIR] codex-rs/otel/src
+- [x] [DIR] codex-rs/otel/src
 - [ ] [DIR] codex-rs/otel/src/events
 - [ ] [DIR] codex-rs/otel/src/metrics
 - [ ] [DIR] codex-rs/otel/tests

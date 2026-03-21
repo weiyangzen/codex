@@ -1,636 +1,647 @@
 # codex-rs/otel 深度研究文档
 
-## 1. 场景与职责
+## 目录
 
-`codex-otel` 是 Codex 项目的 OpenTelemetry 集成 crate，负责为 Codex CLI、TUI、exec 等组件提供统一的遥测（Telemetry）能力。其核心职责包括：
-
-### 1.1 主要使用场景
-
-- **日志收集（Logs）**：收集 Codex 运行时的结构化日志事件，如用户提示、工具调用结果、API 请求等
-- **链路追踪（Traces）**：记录请求链路，支持 W3C Trace Context 传播，实现分布式追踪
-- **指标收集（Metrics）**：收集计数器（Counter）、直方图（Histogram）等度量数据，如工具调用次数、API 延迟等
-- **会话遥测（Session Telemetry）**：为每个用户会话建立统一的遥测上下文，自动附加会话元数据
-
-### 1.2 架构定位
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        调用方 (Dependents)                       │
-├─────────────┬─────────────┬─────────────┬─────────────────────────┤
-│  codex-cli  │  codex-tui  │ codex-exec  │    codex-app-server     │
-│  (CLI入口)   │  (TUI界面)   │  (执行器)   │    (应用服务器)          │
-└──────┬──────┴──────┬──────┴──────┬──────┴───────────┬─────────────┘
-       │             │             │                  │
-       └─────────────┴─────────────┴──────────────────┘
-                           │
-                    ┌──────▼──────┐
-                    │  codex-otel │
-                    │ (本研究对象) │
-                    └──────┬──────┘
-                           │
-       ┌───────────────────┼───────────────────┐
-       │                   │                   │
-┌──────▼──────┐    ┌──────▼──────┐    ┌──────▼──────┐
-│ OTLP/HTTP   │    │ OTLP/gRPC   │    │   Statsig   │
-│  (日志/追踪) │    │  (日志/追踪) │    │  (指标收集)  │
-└─────────────┘    └─────────────┘    └─────────────┘
-```
-
-### 1.3 关键设计原则
-
-1. **双轨导出策略**：敏感数据（完整日志）与非敏感数据（追踪事件）分离导出
-2. **会话隔离**：每个会话拥有独立的遥测上下文，支持多会话并发
-3. **运行时自适应**：根据 tokio 运行时类型（单线程/多线程）自动调整导出策略
-4. **零开销禁用**：通过 feature flag 可在测试环境完全禁用网络导出
+1. [场景与职责](#场景与职责)
+2. [功能点目的](#功能点目的)
+3. [具体技术实现](#具体技术实现)
+4. [关键代码路径与文件引用](#关键代码路径与文件引用)
+5. [依赖与外部交互](#依赖与外部交互)
+6. [风险、边界与改进建议](#风险边界与改进建议)
 
 ---
 
-## 2. 功能点目的
+## 场景与职责
 
-### 2.1 核心功能模块
+`codex-otel` 是 Codex 项目的 OpenTelemetry 集成 crate，负责提供统一的**可观测性（Observability）**基础设施。它作为 Codex 核心模块与 OpenTelemetry 生态之间的桥梁，承担以下核心职责：
 
-| 模块 | 文件路径 | 功能目的 |
-|------|----------|----------|
-| **Provider** | `src/provider.rs` | 初始化 OTEL 导出器，配置日志/追踪/指标三层导出 |
-| **SessionTelemetry** | `src/events/session_telemetry.rs` | 会话级遥测管理，自动附加会话元数据到所有事件 |
-| **MetricsClient** | `src/metrics/client.rs` | 指标收集客户端，支持 Counter/Histogram/Duration 记录 |
-| **TraceContext** | `src/trace_context.rs` | W3C Trace Context 传播，支持跨服务链路追踪 |
-| **OTLP** | `src/otlp.rs` | OTLP 协议底层实现，支持 HTTP/gRPC 双协议 |
+### 核心职责
 
-### 2.2 功能详细说明
+| 职责领域 | 说明 |
+|---------|------|
+| **Trace（链路追踪）** | 通过 OpenTelemetry SDK 实现分布式链路追踪，支持 W3C Trace Context 标准传播 |
+| **Metrics（指标收集）** | 提供 Counter、Histogram、Timer 等度量指标收集能力，支持 OTLP/HTTP/gRPC 导出 |
+| **Logs（日志导出）** | 将 tracing 事件导出到 OpenTelemetry Collector，支持分层过滤策略 |
+| **Session Telemetry（会话遥测）** | 封装 Codex 特定的业务事件（user_prompt、tool_result、api_request 等）|
+| **Runtime Metrics（运行时指标）** | 提供运行时指标快照能力，用于性能分析和调试 |
 
-#### 2.2.1 OtelProvider - 全局导出器管理
+### 架构定位
 
-```rust
-pub struct OtelProvider {
-    pub logger: Option<SdkLoggerProvider>,      // 日志导出器
-    pub tracer_provider: Option<SdkTracerProvider>, // 追踪导出器
-    pub tracer: Option<Tracer>,                // 追踪器实例
-    pub metrics: Option<MetricsClient>,        // 指标客户端
-}
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Codex Application                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
+│  │   codex-cli  │  │  codex-tui   │  │  codex-app-server│   │
+│  └──────┬───────┘  └──────┬───────┘  └────────┬─────────┘   │
+└─────────┼─────────────────┼───────────────────┼─────────────┘
+          │                 │                   │
+          └─────────────────┼───────────────────┘
+                            ▼
+              ┌─────────────────────────┐
+              │      codex-core         │
+              │  (business logic layer) │
+              └───────────┬─────────────┘
+                          │
+          ┌───────────────┼───────────────┐
+          ▼               ▼               ▼
+   ┌────────────┐  ┌────────────┐  ┌────────────┐
+   │   Logs     │  │   Traces   │  │   Metrics  │
+   │  (events)  │  │   (spans)  │  │  (counters)│
+   └─────┬──────┘  └─────┬──────┘  └─────┬──────┘
+         │               │               │
+         └───────────────┼───────────────┘
+                         ▼
+              ┌─────────────────────┐
+              │    codex-otel       │
+              │  (this crate)       │
+              └──────────┬──────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         ▼               ▼               ▼
+   ┌────────────┐  ┌────────────┐  ┌────────────┐
+   │ OTLP/HTTP  │  │ OTLP/gRPC  │  │  Statsig   │
+   │  (JSON/    │  │            │  │  (internal)│
+   │  Binary)   │  │            │  │            │
+   └────────────┘  └────────────┘  └────────────┘
 ```
 
-- 支持独立配置日志、追踪、指标的导出目标
-- 自动设置全局 tracer provider 和 propagator
-- 提供 `logger_layer()` 和 `tracing_layer()` 供 tracing_subscriber 使用
+### 使用场景
 
-#### 2.2.2 SessionTelemetry - 会话遥测
-
-```rust
-pub struct SessionTelemetry {
-    pub(crate) metadata: SessionTelemetryMetadata,  // 会话元数据
-    pub(crate) metrics: Option<MetricsClient>,      // 指标客户端
-    pub(crate) metrics_use_metadata_tags: bool,     // 是否自动附加元数据标签
-}
-```
-
-核心能力：
-- **自动元数据附加**：会话 ID、模型、认证模式、终端类型等自动附加到所有指标
-- **双轨事件记录**：
-  - `log_event!` → 完整数据（含敏感信息）→ 日志系统
-  - `trace_event!` → 脱敏数据（仅统计）→ 追踪系统
-- **业务事件封装**：封装 `user_prompt`, `tool_result`, `api_request` 等业务事件
-
-#### 2.2.3 MetricsClient - 指标收集
-
-支持指标类型：
-- **Counter**：计数器，如 `codex.tool.call`
-- **Histogram**：直方图，如 `codex.tool.call.duration_ms`
-- **Duration Histogram**：自动记录持续时间，单位毫秒
-
-运行时指标（Runtime Metrics）：
-- 工具调用统计（次数/耗时）
-- API 请求统计
-- WebSocket 事件统计
-- SSE 事件统计
-- Responses API 性能指标（TTFT/TBT/Overhead）
-
-#### 2.2.4 Trace Context 传播
-
-```rust
-// 从环境变量加载父级 Trace Context
-pub fn traceparent_context_from_env() -> Option<Context>
-
-// 从 W3C Trace Context 设置当前 span 的父级
-pub fn set_parent_from_w3c_trace_context(span: &Span, trace: &W3cTraceContext) -> bool
-
-// 获取当前 span 的 W3C Trace Context
-pub fn current_span_w3c_trace_context() -> Option<W3cTraceContext>
-```
+1. **开发调试**：通过 InMemoryMetricExporter 收集指标，验证业务逻辑正确性
+2. **生产监控**：通过 OTLP 导出到 OpenTelemetry Collector，接入 Prometheus/Grafana
+3. **性能分析**：通过 RuntimeMetricsSummary 获取 API 调用、工具执行等耗时统计
+4. **安全审计**：通过 SessionTelemetry 记录用户提示、工具调用等敏感操作（支持脱敏）
 
 ---
 
-## 3. 具体技术实现
+## 功能点目的
 
-### 3.1 关键数据结构
+### 1. OtelProvider - 统一出口提供者
 
-#### 3.1.1 导出器配置
+**目的**：整合 Logs、Traces、Metrics 三种可观测性信号，提供统一的初始化和关闭接口。
+
+**关键特性**：
+- 支持独立配置三种信号的导出器（可分别启用/禁用）
+- 自动设置全局 TracerProvider 和 TextMapPropagator
+- 提供 `logger_layer()` 和 `tracing_layer()` 供 tracing_subscriber 注册
+- 实现 `Drop` trait 确保优雅关闭
+
+### 2. SessionTelemetry - 会话级业务遥测
+
+**目的**：封装 Codex 特定的业务语义，统一记录会话生命周期中的关键事件。
+
+**核心事件类型**：
+
+| 事件方法 | 触发场景 | 敏感数据处理 |
+|---------|---------|-------------|
+| `conversation_starts` | 新会话开始 | 记录配置信息（沙盒策略、MCP 服务器等）|
+| `user_prompt` | 用户提交输入 | 支持 `log_user_prompts` 开关控制是否记录原始内容 |
+| `tool_result_with_tags` | 工具执行完成 | Log 输出完整内容，Trace 仅输出长度统计 |
+| `record_api_request` | API 请求完成 | 记录认证相关元数据（脱敏）|
+| `record_websocket_*` | WebSocket 连接/请求/事件 | 记录连接复用、时序指标 |
+| `record_auth_recovery` | 认证恢复流程 | 记录恢复步骤和结果 |
+| `log_sse_event` | SSE 流事件 | 解析响应类型并记录时序 |
+
+**双轨导出策略**：
+- **Log 轨道**（`codex_otel.log_only`）：包含完整敏感信息，用于审计
+- **Trace 轨道**（`codex_otel.trace_safe`）：脱敏后仅包含统计信息，用于分布式追踪
+
+### 3. MetricsClient - 指标收集客户端
+
+**目的**：提供类型安全的指标收集 API，支持 Counter、Histogram、Timer 三种类型。
+
+**设计特点**：
+- 惰性创建指标仪器（首次使用时初始化）
+- 支持默认标签（所有指标自动附加）
+- 支持运行时快照（通过 ManualReader）
+- 严格的命名和标签校验（防止非法字符）
+
+### 4. Trace Context - 链路上下文传播
+
+**目的**：实现 W3C Trace Context 标准，支持跨服务/跨进程的链路追踪。
+
+**核心功能**：
+- `current_span_w3c_trace_context()`：获取当前 Span 的 W3C 上下文
+- `set_parent_from_w3c_trace_context()`：从上游上下文恢复 Span 父子关系
+- `traceparent_context_from_env()`：从环境变量 `TRACEPARENT`/`TRACESTATE` 恢复上下文
+
+### 5. Runtime Metrics Summary - 运行时指标汇总
+
+**目的**：提供会话级别的性能统计，用于诊断和优化。
+
+**统计维度**：
+- Tool Calls（次数、耗时）
+- API Calls（次数、耗时）
+- Streaming Events（SSE 事件次数、耗时）
+- WebSocket Calls/Events（次数、耗时）
+- Responses API 细分指标（Overhead、Inference、TTFT、TBT）
+- Turn-level 指标（TTFT、TTFM）
+
+---
+
+## 具体技术实现
+
+### 3.1 配置与初始化流程
+
+#### OtelSettings 配置结构
 
 ```rust
 // src/config.rs
-#[derive(Clone, Debug)]
-pub enum OtelExporter {
-    None,
-    Statsig,  // Statsig 专用快捷配置
-    OtlpGrpc { endpoint: String, headers: HashMap<String, String>, tls: Option<OtelTlsConfig> },
-    OtlpHttp { endpoint: String, headers: HashMap<String, String>, protocol: OtelHttpProtocol, tls: Option<OtelTlsConfig> },
-}
-
 pub struct OtelSettings {
-    pub environment: String,
-    pub service_name: String,
-    pub service_version: String,
-    pub codex_home: PathBuf,
-    pub exporter: OtelExporter,        // 日志导出器
-    pub trace_exporter: OtelExporter,  // 追踪导出器
-    pub metrics_exporter: OtelExporter, // 指标导出器
+    pub environment: String,           // 环境标识（dev/staging/prod）
+    pub service_name: String,          // 服务名称
+    pub service_version: String,       // 服务版本
+    pub codex_home: PathBuf,           // Codex 主目录
+    pub exporter: OtelExporter,        // Logs 导出器
+    pub trace_exporter: OtelExporter,  // Traces 导出器
+    pub metrics_exporter: OtelExporter,// Metrics 导出器
     pub runtime_metrics: bool,         // 是否启用运行时指标
 }
-```
 
-#### 3.1.2 指标数据结构
-
-```rust
-// src/metrics/client.rs
-#[derive(Debug)]
-struct MetricsClientInner {
-    meter_provider: SdkMeterProvider,
-    meter: Meter,
-    counters: Mutex<HashMap<String, Counter<u64>>>,
-    histograms: Mutex<HashMap<String, Histogram<f64>>>,
-    duration_histograms: Mutex<HashMap<String, Histogram<f64>>>,
-    runtime_reader: Option<Arc<ManualReader>>,  // 运行时快照读取器
-    default_tags: BTreeMap<String, String>,
+pub enum OtelExporter {
+    None,
+    Statsig,  // 内部 Statsig 快捷配置
+    OtlpGrpc { endpoint, headers, tls },
+    OtlpHttp { endpoint, headers, protocol, tls },
 }
 ```
 
-#### 3.1.3 运行时指标汇总
+#### Provider 初始化流程
 
 ```rust
-// src/metrics/runtime_metrics.rs
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RuntimeMetricsSummary {
-    pub tool_calls: RuntimeMetricTotals,
-    pub api_calls: RuntimeMetricTotals,
-    pub streaming_events: RuntimeMetricTotals,
-    pub websocket_calls: RuntimeMetricTotals,
-    pub websocket_events: RuntimeMetricTotals,
-    pub responses_api_overhead_ms: u64,
-    pub responses_api_inference_time_ms: u64,
-    pub responses_api_engine_iapi_ttft_ms: u64,
-    pub responses_api_engine_service_ttft_ms: u64,
-    pub responses_api_engine_iapi_tbt_ms: u64,
-    pub responses_api_engine_service_tbt_ms: u64,
-    pub turn_ttft_ms: u64,
-    pub turn_ttfm_ms: u64,
+// src/provider.rs:67-120
+pub fn from(settings: &OtelSettings) -> Result<Option<Self>, Box<dyn Error>> {
+    // 1. 解析并配置 Metrics 导出器
+    let metric_exporter = crate::config::resolve_exporter(&settings.metrics_exporter);
+    let metrics = if matches!(metric_exporter, OtelExporter::None) {
+        None
+    } else {
+        Some(MetricsClient::new(config)?)
+    };
+    
+    // 2. 安装全局 Metrics 客户端
+    if let Some(metrics) = metrics.as_ref() {
+        crate::metrics::install_global(metrics.clone());
+    }
+    
+    // 3. 构建 Logger（如果启用）
+    let logger = log_enabled
+        .then(|| build_logger(&log_resource, &settings.exporter))
+        .transpose()?;
+    
+    // 4. 构建 TracerProvider（如果启用）
+    let tracer_provider = trace_enabled
+        .then(|| build_tracer_provider(&trace_resource, &settings.trace_exporter))
+        .transpose()?;
+    
+    // 5. 设置全局 TracerProvider 和 Propagator
+    if let Some(provider) = tracer_provider.clone() {
+        global::set_tracer_provider(provider);
+        global::set_text_map_propagator(TraceContextPropagator::new());
+    }
+    
+    Ok(Some(Self { logger, tracer_provider, tracer, metrics }))
 }
 ```
 
-### 3.2 关键流程
+### 3.2 SessionTelemetry 事件记录机制
 
-#### 3.2.1 Provider 初始化流程
-
-```
-OtelProvider::from(settings)
-    ├── resolve_exporter(&settings.metrics_exporter)
-    │   └── Statsig → OtlpHttp (内置 endpoint 和 API key)
-    ├── MetricsClient::new(config) [可选]
-    │   ├── 验证 default_tags
-    │   ├── 构建 Resource (service.name, service.version, env, os)
-    │   ├── 创建 ManualReader [如启用 runtime_metrics]
-    │   └── 构建 PeriodicReader + SdkMeterProvider
-    ├── install_global(metrics) [全局指标客户端]
-    ├── build_logger() [如启用日志]
-    │   ├── OTLP/gRPC: 使用 tonic + TLS 配置
-    │   └── OTLP/HTTP: 使用 reqwest + 协议选择(Binary/JSON)
-    ├── build_tracer_provider() [如启用追踪]
-    │   └── 根据运行时类型选择 BatchSpanProcessor
-    └── global::set_tracer_provider() + set_text_map_propagator()
-```
-
-#### 3.2.2 双轨事件导出流程
+#### 双轨导出宏实现
 
 ```rust
 // src/events/shared.rs
+macro_rules! log_event {
+    ($self:expr, $($fields:tt)*) => {{
+        tracing::event!(
+            target: $crate::targets::OTEL_LOG_ONLY_TARGET,  // 关键：指定 log_only 目标
+            tracing::Level::INFO,
+            $($fields)*
+            // 自动附加会话元数据
+            conversation.id = %$self.metadata.conversation_id,
+            app.version = %$self.metadata.app_version,
+            auth_mode = $self.metadata.auth_mode,
+            // ... 其他元数据
+        );
+    }};
+}
 
-// 宏展开示例：log_and_trace_event!
-log_and_trace_event!(
-    self,
-    common: { event.name = "codex.user_prompt", prompt_length = %len },
-    log:   { prompt = %prompt },           // 仅日志（含敏感数据）
-    trace: { text_input_count = 1 },      // 仅追踪（统计数据）
-);
-
-// 展开后：
-tracing::event!(
-    target: "codex_otel.log_only",  // 日志目标
-    Level::INFO,
-    event.name = "codex.user_prompt",
-    prompt_length = %len,
-    prompt = %prompt,  // 敏感数据
-    // ... 元数据字段
-);
-
-tracing::event!(
-    target: "codex_otel.trace_safe", // 追踪目标
-    Level::INFO,
-    event.name = "codex.user_prompt",
-    prompt_length = %len,
-    text_input_count = 1,  // 统计数据
-    // ... 元数据字段（不含敏感信息）
-);
+macro_rules! trace_event {
+    ($self:expr, $($fields:tt)*) => {{
+        tracing::event!(
+            target: $crate::targets::OTEL_TRACE_SAFE_TARGET,  // 关键：指定 trace_safe 目标
+            tracing::Level::INFO,
+            $($fields)*
+            // 自动附加会话元数据（不含敏感字段如 user.email）
+            conversation.id = %$self.metadata.conversation_id,
+            // ...
+        );
+    }};
+}
 ```
 
-过滤逻辑：
+#### 目标过滤策略
+
 ```rust
 // src/targets.rs
+pub(crate) const OTEL_LOG_ONLY_TARGET: &str = "codex_otel.log_only";
+pub(crate) const OTEL_TRACE_SAFE_TARGET: &str = "codex_otel.trace_safe";
+
 pub(crate) fn is_log_export_target(target: &str) -> bool {
-    target.starts_with("codex_otel") && !is_trace_safe_target(target)
+    target.starts_with(OTEL_TARGET_PREFIX) && !is_trace_safe_target(target)
 }
 
 pub(crate) fn is_trace_safe_target(target: &str) -> bool {
-    target.starts_with("codex_otel.trace_safe")
+    target.starts_with(OTEL_TRACE_SAFE_TARGET)
 }
 ```
 
-#### 3.2.3 指标记录流程
+#### Provider 层过滤配置
 
 ```rust
-// 全局指标（通过 start_global_timer）
-start_global_timer("codex.api_request.duration_ms", &[("route", "/responses")])
-    └── Timer::new(name, tags, global_client)
-        └── Drop::drop() 自动记录持续时间
+// src/provider.rs:122-144
+pub fn logger_layer<S>(&self) -> Option<impl Layer<S> + Send + Sync> {
+    self.logger.as_ref().map(|logger| {
+        OpenTelemetryTracingBridge::new(logger).with_filter(
+            tracing_subscriber::filter::filter_fn(OtelProvider::log_export_filter),
+        )
+    })
+}
 
-// SessionTelemetry 指标
-session.counter("codex.tool.call", 1, &[("tool", "shell")])
-    ├── tags_with_metadata()  // 合并会话元数据标签
-    │   └── SessionMetricTagValues::into_tags()
-    │       ├── auth_mode, session_source, originator
-    │       ├── service_name, model, app_version
-    │       └── 验证标签键值
-    └── metrics.counter(name, inc, merged_tags)
-        ├── validate_metric_name()
-        ├── attributes()  // 合并 default_tags
-        └── Counter::add()
+pub fn tracing_layer<S>(&self) -> Option<impl Layer<S> + Send + Sync> {
+    self.tracer.as_ref().map(|tracer| {
+        tracing_opentelemetry::layer()
+            .with_tracer(tracer.clone())
+            .with_filter(tracing_subscriber::filter::filter_fn(
+                OtelProvider::trace_export_filter,
+            ))
+    })
+}
 ```
 
-### 3.3 协议实现
+### 3.3 MetricsClient 实现细节
 
-#### 3.3.1 OTLP HTTP 客户端构建
+#### 内部数据结构
 
 ```rust
-// src/otlp.rs
+// src/metrics/client.rs:81-90
+struct MetricsClientInner {
+    meter_provider: SdkMeterProvider,
+    meter: Meter,
+    counters: Mutex<HashMap<String, Counter<u64>>>,      // 惰性创建的计数器
+    histograms: Mutex<HashMap<String, Histogram<f64>>>,  // 惰性创建的直方图
+    duration_histograms: Mutex<HashMap<String, Histogram<f64>>>,
+    runtime_reader: Option<Arc<ManualReader>>,           // 运行时快照读取器
+    default_tags: BTreeMap<String, String>,              // 默认标签
+}
+```
 
-// 关键函数：处理 tokio 运行时兼容性
-pub(crate) fn build_http_client(
-    tls: &OtelTlsConfig,
-    timeout_var: &str,
-) -> Result<reqwest::blocking::Client> {
-    if current_tokio_runtime_is_multi_thread() {
-        // 多线程运行时：使用 block_in_place 避免阻塞
-        tokio::task::block_in_place(|| build_http_client_inner(tls, timeout_var))
-    } else if tokio::runtime::Handle::try_current().is_ok() {
-        // 单线程运行时：spawn 新线程避免阻塞当前线程
-        std::thread::spawn(move || build_http_client_inner(&tls, &timeout_var))
-            .join()
-            .map_err(...)
-    } else {
-        // 非 tokio 环境：直接构建
-        build_http_client_inner(tls, timeout_var)
+#### Counter 实现
+
+```rust
+// src/metrics/client.rs:93-112
+fn counter(&self, name: &str, inc: i64, tags: &[(&str, &str)]) -> Result<()> {
+    validate_metric_name(name)?;
+    if inc < 0 {
+        return Err(MetricsError::NegativeCounterIncrement { name: name.to_string(), inc });
+    }
+    let attributes = self.attributes(tags)?;
+    
+    let mut counters = self.counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let counter = counters
+        .entry(name.to_string())
+        .or_insert_with(|| self.meter.u64_counter(name.to_string()).build());
+    counter.add(inc as u64, &attributes);
+    Ok(())
+}
+```
+
+#### Timer 实现（RAII 模式）
+
+```rust
+// src/metrics/timer.rs
+pub struct Timer {
+    name: String,
+    tags: Vec<(String, String)>,
+    client: MetricsClient,
+    start_time: Instant,
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        if let Err(e) = self.record(&[]) {
+            tracing::error!("metrics client error: {}", e);
+        }
     }
 }
+
+pub fn record(&self, additional_tags: &[(&str, &str)]) -> Result<()> {
+    let mut tags = Vec::with_capacity(self.tags.len() + additional_tags.len());
+    tags.extend(additional_tags);
+    tags.extend(self.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    self.client.record_duration(&self.name, self.start_time.elapsed(), &tags)
+}
 ```
 
-#### 3.3.2 TLS 配置
+### 3.4 OTLP 导出器 TLS 配置
 
 ```rust
-// gRPC TLS 配置
-fn build_grpc_tls_config(
+// src/otlp.rs:34-68
+pub(crate) fn build_grpc_tls_config(
     endpoint: &str,
     tls_config: ClientTlsConfig,
     tls: &OtelTlsConfig,
-) -> Result<ClientTlsConfig> {
+) -> Result<ClientTlsConfig, Box<dyn Error>> {
     let uri: Uri = endpoint.parse()?;
-    let host = uri.host().ok_or_else(...)?;
+    let host = uri.host().ok_or_else(|| { /* ... */ })?;
+    
     let mut config = tls_config.domain_name(host.to_owned());
     
-    // CA 证书
+    // CA 证书配置
     if let Some(path) = tls.ca_certificate.as_ref() {
         let (pem, _) = read_bytes(path)?;
         config = config.ca_certificate(TonicCertificate::from_pem(pem));
     }
     
-    // mTLS 客户端证书
+    // mTLS 客户端证书配置
     match (&tls.client_certificate, &tls.client_private_key) {
         (Some(cert_path), Some(key_path)) => {
             let (cert_pem, _) = read_bytes(cert_path)?;
             let (key_pem, _) = read_bytes(key_path)?;
             config = config.identity(TonicIdentity::from_pem(cert_pem, key_pem));
         }
-        ...
+        // 校验：必须同时提供证书和私钥
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(config_error(
+                "client_certificate and client_private_key must both be provided for mTLS"
+            ));
+        }
+        (None, None) => {}
     }
+    
     Ok(config)
 }
 ```
 
-### 3.4 命令与配置
-
-#### 3.4.1 Statsig 内置配置
+### 3.5 Runtime Metrics 快照机制
 
 ```rust
-// src/config.rs
-pub(crate) const STATSIG_OTLP_HTTP_ENDPOINT: &str = "https://ab.chatgpt.com/otlp/v1/metrics";
-pub(crate) const STATSIG_API_KEY_HEADER: &str = "statsig-api-key";
-pub(crate) const STATSIG_API_KEY: &str = "client-MkRuleRQBd6qakfnDYqJVR9JuXcY57Ljly3vi5JVUIO";
-
-pub(crate) fn resolve_exporter(exporter: &OtelExporter) -> OtelExporter {
-    match exporter {
-        OtelExporter::Statsig => {
-            // 测试环境禁用
-            if cfg!(test) || cfg!(feature = "disable-default-metrics-exporter") {
-                return OtelExporter::None;
-            }
-            // 解析为 OTLP/HTTP JSON
-            OtelExporter::OtlpHttp { ... }
-        }
-        _ => exporter.clone(),
+// src/metrics/runtime_metrics.rs:119-169
+pub(crate) fn from_snapshot(snapshot: &ResourceMetrics) -> Self {
+    Self {
+        tool_calls: RuntimeMetricTotals {
+            count: sum_counter(snapshot, TOOL_CALL_COUNT_METRIC),
+            duration_ms: sum_histogram_ms(snapshot, TOOL_CALL_DURATION_METRIC),
+        },
+        api_calls: RuntimeMetricTotals {
+            count: sum_counter(snapshot, API_CALL_COUNT_METRIC),
+            duration_ms: sum_histogram_ms(snapshot, API_CALL_DURATION_METRIC),
+        },
+        // ... 其他指标聚合
     }
 }
-```
 
-#### 3.4.2 环境变量支持
-
-```rust
-// src/trace_context.rs
-const TRACEPARENT_ENV_VAR: &str = "TRACEPARENT";
-const TRACESTATE_ENV_VAR: &str = "TRACESTATE";
-
-// src/otlp.rs - 超时配置
-const OTEL_EXPORTER_OTLP_TIMEOUT: &str = "OTEL_EXPORTER_OTLP_TIMEOUT";
-const OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT: Duration = Duration::from_millis(10000);
-
-fn resolve_otlp_timeout(signal_var: &str) -> Duration {
-    // 优先级：信号特定变量 > 通用变量 > 默认值
-    read_timeout_env(signal_var)
-        .or_else(|| read_timeout_env(OTEL_EXPORTER_OTLP_TIMEOUT))
-        .unwrap_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT)
+fn sum_counter(snapshot: &ResourceMetrics, name: &str) -> u64 {
+    snapshot
+        .scope_metrics()
+        .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
+        .filter(|metric| metric.name() == name)
+        .map(sum_counter_metric)
+        .sum()
 }
 ```
 
 ---
 
-## 4. 关键代码路径与文件引用
+## 关键代码路径与文件引用
 
-### 4.1 核心源码文件
+### 核心模块文件
 
-| 文件 | 行数 | 职责 |
-|------|------|------|
-| `src/lib.rs` | 51 | crate 根模块，导出公共 API |
-| `src/provider.rs` | 462 | OtelProvider 实现，日志/追踪/指标初始化 |
-| `src/config.rs` | 76 | 导出器配置，Statsig 解析 |
-| `src/otlp.rs` | 272 | OTLP 协议底层，TLS/HTTP 客户端构建 |
-| `src/trace_context.rs` | 174 | W3C Trace Context 传播 |
-| `src/targets.rs` | 11 | 日志/追踪目标过滤常量 |
-| `src/events/session_telemetry.rs` | 1093 | SessionTelemetry 实现 |
-| `src/events/shared.rs` | 60 | 事件记录宏（log_event!, trace_event!） |
-| `src/metrics/client.rs` | 406 | MetricsClient 实现 |
-| `src/metrics/config.rs` | 83 | MetricsConfig 构建器 |
-| `src/metrics/names.rs` | 33 | 指标名称常量 |
-| `src/metrics/tags.rs` | 108 | 会话标签值构建 |
-| `src/metrics/timer.rs` | 41 | Timer 自动记录持续时间 |
-| `src/metrics/validation.rs` | 55 | 指标名称/标签验证 |
-| `src/metrics/runtime_metrics.rs` | 216 | 运行时指标汇总 |
-| `src/metrics/error.rs` | 46 | 指标错误类型 |
+| 文件路径 | 职责 | 关键类型/函数 |
+|---------|------|--------------|
+| `src/lib.rs` | 模块导出和公共 API | `SessionTelemetry`, `OtelProvider`, `ToolDecisionSource`, `TelemetryAuthMode` |
+| `src/config.rs` | OTEL 配置定义 | `OtelSettings`, `OtelExporter`, `OtelHttpProtocol`, `OtelTlsConfig` |
+| `src/provider.rs` | Provider 初始化和层构建 | `OtelProvider::from()`, `logger_layer()`, `tracing_layer()` |
+| `src/otlp.rs` | OTLP 导出器 TLS/HTTP 配置 | `build_grpc_tls_config()`, `build_http_client()`, `build_async_http_client()` |
+| `src/targets.rs` | Tracing 目标过滤 | `OTEL_LOG_ONLY_TARGET`, `OTEL_TRACE_SAFE_TARGET`, `is_log_export_target()` |
+| `src/trace_context.rs` | W3C Trace Context 实现 | `current_span_w3c_trace_context()`, `set_parent_from_w3c_trace_context()` |
 
-### 4.2 测试文件
+### Events 模块
 
-| 文件 | 职责 |
-|------|------|
-| `tests/tests.rs` | 测试入口 |
-| `tests/harness/mod.rs` | 测试工具（InMemoryMetricExporter 封装） |
-| `tests/suite/send.rs` | 指标发送/标签合并测试 |
-| `tests/suite/manager_metrics.rs` | SessionTelemetry 元数据标签测试 |
-| `tests/suite/snapshot.rs` | 运行时指标快照测试 |
-| `tests/suite/timing.rs` | Timer/Duration 记录测试 |
-| `tests/suite/validation.rs` | 指标名称/标签验证测试 |
-| `tests/suite/runtime_summary.rs` | RuntimeMetricsSummary 收集测试 |
-| `tests/suite/otel_export_routing_policy.rs` | 双轨导出策略测试 |
-| `tests/suite/otlp_http_loopback.rs` | OTLP HTTP 端到端测试 |
+| 文件路径 | 职责 | 关键类型/函数 |
+|---------|------|--------------|
+| `src/events/mod.rs` | Events 模块组织 | 子模块导出 |
+| `src/events/session_telemetry.rs` | 会话遥测实现 | `SessionTelemetry`, `SessionTelemetryMetadata`, `AuthEnvTelemetryMetadata` |
+| `src/events/shared.rs` | 共享宏和工具 | `log_event!`, `trace_event!`, `log_and_trace_event!`, `timestamp()` |
 
-### 4.3 关键调用链
+### Metrics 模块
 
-#### 4.3.1 指标记录完整链路
+| 文件路径 | 职责 | 关键类型/函数 |
+|---------|------|--------------|
+| `src/metrics/mod.rs` | Metrics 模块组织和全局客户端 | `MetricsClient`, `GLOBAL_METRICS`, `install_global()`, `global()` |
+| `src/metrics/client.rs` | MetricsClient 实现 | `MetricsClient::new()`, `counter()`, `histogram()`, `record_duration()`, `snapshot()` |
+| `src/metrics/config.rs` | Metrics 配置 | `MetricsConfig`, `MetricsExporter` |
+| `src/metrics/error.rs` | 错误类型定义 | `MetricsError` |
+| `src/metrics/names.rs` | 指标名称常量 | `TOOL_CALL_COUNT_METRIC`, `API_CALL_DURATION_METRIC`, `TURN_TTFT_DURATION_METRIC` 等 |
+| `src/metrics/tags.rs` | 会话标签管理 | `SessionMetricTagValues`, `AUTH_MODE_TAG`, `MODEL_TAG` 等 |
+| `src/metrics/timer.rs` | Timer 实现 | `Timer` (RAII 模式) |
+| `src/metrics/validation.rs` | 命名校验 | `validate_metric_name()`, `validate_tag_key()`, `validate_tag_value()` |
+| `src/metrics/runtime_metrics.rs` | 运行时指标汇总 | `RuntimeMetricsSummary`, `RuntimeMetricTotals` |
+
+### 测试文件
+
+| 文件路径 | 测试范围 |
+|---------|---------|
+| `tests/suite/send.rs` | Metrics 发送和标签合并 |
+| `tests/suite/timing.rs` | Timer 和 Duration 记录 |
+| `tests/suite/validation.rs` | 命名和标签校验 |
+| `tests/suite/snapshot.rs` | 运行时快照功能 |
+| `tests/suite/manager_metrics.rs` | SessionTelemetry 标签附加 |
+| `tests/suite/runtime_summary.rs` | RuntimeMetricsSummary 聚合 |
+| `tests/suite/otel_export_routing_policy.rs` | Log/Trace 双轨导出策略 |
+| `tests/suite/otlp_http_loopback.rs` | OTLP HTTP 导出器端到端测试 |
+
+### 调用方（Callers）
+
+| 调用方 | 文件路径 | 使用方式 |
+|-------|---------|---------|
+| codex-core | `core/src/otel_init.rs` | 从 Config 构建 OtelProvider |
+| codex-core | `core/src/auth_env_telemetry.rs` | 构建 AuthEnvTelemetryMetadata |
+| codex-core | `core/src/client.rs` | 使用 SessionTelemetry 记录 API 请求 |
+| codex-core | `core/src/turn_timing.rs` | 记录 Turn 级时序指标 |
+| codex-tui | `tui/src/app.rs` | 初始化 OTEL 和 SessionTelemetry |
+| codex-exec | `exec/src/lib.rs` | 使用 SessionTelemetry |
+
+---
+
+## 依赖与外部交互
+
+### 外部 Crate 依赖
+
+| Crate | 用途 | 版本特性 |
+|-------|------|---------|
+| `opentelemetry` | OpenTelemetry API | `logs`, `metrics`, `trace` |
+| `opentelemetry_sdk` | OpenTelemetry SDK | `rt-tokio`, `testing`, `experimental_*` |
+| `opentelemetry_otlp` | OTLP 导出器 | `grpc-tonic`, `http-proto`, `http-json`, `logs`, `metrics`, `trace` |
+| `opentelemetry-appender-tracing` | Tracing 到 OTEL Logs 桥接 | - |
+| `opentelemetry-semantic-conventions` | 语义约定常量 | - |
+| `tracing` | 结构化日志/span | - |
+| `tracing-opentelemetry` | Tracing 到 OTEL Traces 桥接 | - |
+| `tracing-subscriber` | 订阅者注册和过滤 | - |
+| `reqwest` | HTTP 客户端（TLS 配置）| `blocking`, `rustls-tls` |
+| `tokio` | 异步运行时检测 | - |
+| `serde`/`serde_json` | JSON 序列化 | - |
+| `chrono` | 时间戳格式化 | - |
+| `os_info` | 操作系统信息采集 | - |
+| `gethostname` | 主机名获取 | - |
+
+### Workspace 内部依赖
+
+| Crate | 用途 |
+|-------|------|
+| `codex-utils-absolute-path` | 绝对路径处理（TLS 证书路径）|
+| `codex-utils-string` | 字符串清理（`sanitize_metric_tag_value`）|
+| `codex-api` | API 错误类型 (`ApiError`) |
+| `codex-protocol` | 协议类型 (`ThreadId`, `ResponseEvent`, `UserInput`, `SessionSource` 等) |
+
+### 外部系统交互
 
 ```
-codex_core::tools::orchestrator::execute_tool()
-    └── session_telemetry.log_tool_result_with_tags()
-        ├── metrics.counter(TOOL_CALL_COUNT_METRIC)
-        │   └── MetricsClientInner::counter()
-        │       ├── validate_metric_name()
-        │       ├── attributes() [合并 default_tags + 传入 tags + 会话元数据]
-        │       └── Counter::add()
-        ├── metrics.duration_histogram(TOOL_CALL_DURATION_METRIC)
-        │   └── MetricsClientInner::duration_histogram()
-        └── log_and_trace_event!()
-            ├── tracing::event!(target: "codex_otel.log_only", ...)  // 完整日志
-            └── tracing::event!(target: "codex_otel.trace_safe", ...) // 脱敏追踪
-```
-
-#### 4.3.2 Provider 初始化调用链
-
-```
-codex_core::otel_init::build_provider()
-    ├── to_otel_exporter(&config.otel.exporter)
-    │   └── 转换 Config 中的 OtelExporterKind → OtelExporter
-    └── OtelProvider::from(&OtelSettings)
-        ├── resolve_exporter() [Statsig 解析]
-        ├── MetricsClient::new() [如启用]
-        ├── build_logger() [如启用]
-        ├── build_tracer_provider() [如启用]
-        └── global::set_tracer_provider()
+┌─────────────────┐     OTLP/HTTP (JSON/Binary)     ┌─────────────────┐
+│   codex-otel    │ ───────────────────────────────> │  OTEL Collector │
+│                 │                                  │  (optional)     │
+│                 │     OTLP/gRPC                   │                 │
+│                 │ ───────────────────────────────> │                 │
+│                 │                                  │                 │
+│                 │     HTTP/JSON (Statsig)         │                 │
+│                 │ ───────────────────────────────> │  Statsig        │
+│                 │     https://ab.chatgpt.com/otlp │  (internal)     │
+└─────────────────┘                                  └─────────────────┘
 ```
 
 ---
 
-## 5. 依赖与外部交互
+## 风险、边界与改进建议
 
-### 5.1 外部依赖
+### 已知风险
 
-| Crate | 用途 |
-|-------|------|
-| `opentelemetry` | OTEL API（日志、追踪、指标） |
-| `opentelemetry_sdk` | OTEL SDK 实现 |
-| `opentelemetry_otlp` | OTLP 导出器（HTTP/gRPC） |
-| `opentelemetry-appender-tracing` | tracing 到 OTEL 日志桥接 |
-| `tracing-opentelemetry` | tracing 到 OTEL 追踪桥接 |
-| `tracing-subscriber` | tracing 订阅者基础设施 |
-| `reqwest` | HTTP 客户端（阻塞 + 异步） |
-| `tokio` | 异步运行时适配 |
-| `serde/serde_json` | JSON 序列化 |
-| `chrono` | 时间戳格式化 |
-| `gethostname` | 主机名获取 |
-| `os_info` | 操作系统信息采集 |
+#### 1. 敏感数据泄露风险
 
-### 5.2 内部依赖
-
-| Crate | 用途 |
-|-------|------|
-| `codex-protocol` | ThreadId, W3cTraceContext, SessionSource 等协议类型 |
-| `codex-api` | ApiError, ResponseEvent 等 API 类型 |
-| `codex-utils-string` | sanitize_metric_tag_value |
-| `codex-utils-absolute-path` | AbsolutePathBuf |
-
-### 5.3 被依赖关系
-
-| Crate | 用途 |
-|-------|------|
-| `codex-core` | 核心遥测初始化（otel_init.rs, auth_env_telemetry.rs） |
-| `codex-tui` | TUI 会话遥测（SessionTelemetry 使用） |
-| `codex-exec` | exec 模式遥测 |
-| `codex-app-server` | 应用服务器遥测 |
-| `codex-app-server-test-client` | 测试客户端遥测 |
-| `codex-cloud-requirements` | 云端需求遥测 |
-
----
-
-## 6. 风险、边界与改进建议
-
-### 6.1 已知风险
-
-#### 6.1.1 敏感数据泄露风险
-
-**风险点**：`log_event!` 宏会记录完整提示词和工具输出。
+**风险描述**：虽然 SessionTelemetry 实现了双轨导出策略，但开发者可能误用 `log_event!` 宏将敏感数据发送到 Trace 轨道。
 
 **缓解措施**：
-- `SessionTelemetryMetadata.log_user_prompts` 开关控制是否记录完整提示词
-- 双轨策略确保敏感数据只进入日志系统，不进入追踪系统
-- 用户可通过配置禁用遥测
+- 代码审查时重点关注 `trace_event!` 宏的使用
+- 测试用例 `otel_export_routing_policy.rs` 验证敏感字段不会出现在 Trace 中
 
-**代码位置**：`src/events/session_telemetry.rs:817-858`
+**改进建议**：
+- 考虑在编译期通过类型系统区分 Log-only 和 Trace-safe 数据
 
-#### 6.1.2 运行时兼容性风险
+#### 2. 指标命名冲突
 
-**风险点**：tokio 运行时类型（单线程/多线程）影响 HTTP 客户端构建方式。
+**风险描述**：`MetricsClient` 使用惰性创建的仪器（instrument），如果不同代码路径使用相同名称但不同类型的指标，可能导致运行时错误。
 
-**缓解措施**：
-- `current_tokio_runtime_is_multi_thread()` 自动检测运行时类型
-- 单线程运行时使用 `std::thread::spawn` 避免阻塞
+**当前状态**：OpenTelemetry SDK 会处理同名仪器的复用，但类型不匹配可能导致 panic。
 
-**代码位置**：`src/otlp.rs:70-99`
+**改进建议**：
+- 添加指标名称注册表，在初始化时检测命名冲突
 
-#### 6.1.3 指标名称/标签验证
+#### 3. TLS 证书加载失败
 
-**限制**：指标名称和标签有严格的字符限制（仅允许 ASCII 字母数字、`.`、`_`、`-`，标签额外允许 `/`）。
+**风险描述**：`build_http_client` 在 TLS 配置错误时会返回错误，但错误信息可能不够详细。
 
-**潜在问题**：非法字符会导致指标记录失败。
+**改进建议**：
+- 添加证书文件路径和格式的详细诊断信息
 
-**代码位置**：`src/metrics/validation.rs`
+#### 4. Tokio 运行时检测
 
-### 6.2 边界情况
+**风险描述**：`current_tokio_runtime_is_multi_thread()` 用于决定使用同步还是异步 HTTP 客户端，但检测逻辑依赖于 `tokio::runtime::Handle::try_current()`，在某些边缘场景可能不准确。
 
-#### 6.2.1 全局指标客户端
+**改进建议**：
+- 添加显式的运行时类型配置选项，覆盖自动检测
 
-- 通过 `OnceLock` 设置，只能初始化一次
-- 测试中使用 `InMemoryMetricExporter` 需启用 `with_runtime_reader()` 才能获取快照
+### 边界条件
 
-#### 6.2.2 Statsig 导出器
+#### 1. 高并发指标收集
 
-- 测试环境自动禁用（`cfg!(test)`）
-- 通过 feature `disable-default-metrics-exporter` 可显式禁用
+- `MetricsClientInner` 使用 `Mutex` 保护仪器缓存，高并发场景可能成为瓶颈
+- 当前设计假设指标收集频率较低（< 1K/s）
 
-#### 6.2.3 TLS 配置
+#### 2. 长会话内存使用
 
-- mTLS 需要同时提供客户端证书和私钥
-- CA 证书配置会禁用内置根证书
+- 仪器缓存（`counters`, `histograms`）不会自动清理
+- 长时间运行的会话如果使用大量不同的标签组合，可能导致内存持续增长
 
-### 6.3 改进建议
+#### 3. 网络不可用时
 
-#### 6.3.1 可观测性增强
+- OTLP 导出器有默认超时（通过环境变量 `OTEL_EXPORTER_OTLP_TIMEOUT` 配置）
+- 批量导出失败时，OpenTelemetry SDK 会丢弃数据（非阻塞设计）
 
-1. **指标记录失败告警**：当前指标记录失败仅通过 `tracing::warn!` 输出，建议增加错误统计指标
-2. **导出延迟监控**：增加 OTLP 导出延迟的直方图指标
-3. **导出失败重试**：当前无自动重试机制，建议增加指数退避重试
+### 改进建议
 
-#### 6.3.2 性能优化
+| 优先级 | 建议 | 预期收益 |
+|-------|------|---------|
+| P1 | 添加指标仪器缓存大小限制 | 防止长会话内存泄漏 |
+| P2 | 支持指标标签值自动脱敏（正则匹配）| 减少敏感数据泄露风险 |
+| P2 | 添加 OTLP 导出重试和退避策略 | 提高网络不稳定时的数据可靠性 |
+| P3 | 支持 Prometheus 拉取模式（除推送外）| 简化本地开发调试 |
+| P3 | 添加指标收集性能剖析（自监控）| 便于诊断性能问题 |
 
-1. **标签缓存**：`attributes()` 每次合并标签时创建新 Vec，高频场景可考虑缓存
-2. **批量指标**：当前每次调用立即记录，考虑增加本地缓冲批量发送
+### 测试覆盖率
 
-#### 6.3.3 代码结构
+当前测试覆盖以下场景：
+- ✅ 指标发送和标签合并
+- ✅ Timer 和 Duration 记录
+- ✅ 命名和标签校验
+- ✅ 运行时快照
+- ✅ SessionTelemetry 标签附加
+- ✅ RuntimeMetricsSummary 聚合
+- ✅ Log/Trace 双轨导出策略
+- ✅ OTLP HTTP 端到端（loopback）
 
-1. **SessionTelemetry 拆分**：当前文件超过 1000 行，建议按事件类型拆分为子模块
-2. **错误类型细化**：`MetricsError` 可进一步细分以支持更精确的错误处理
-
-#### 6.3.4 测试覆盖
-
-1. **gRPC 端到端测试**：当前仅 HTTP 有 loopback 测试
-2. **TLS/mTLS 测试**：需要证书 fixtures 支持
-3. **并发场景测试**：多线程指标记录的正确性
-
-### 6.4 配置建议
-
-```toml
-# 生产环境推荐配置
-[otel]
-environment = "prod"
-exporter = { kind = "OtlpHttp", endpoint = "...", protocol = "Binary" }
-trace_exporter = { kind = "OtlpHttp", endpoint = "...", protocol = "Binary" }
-metrics_exporter = "Statsig"  # 使用内置 Statsig 配置
-
-# 测试环境配置
-[otel]
-metrics_exporter = "None"  # 完全禁用指标导出
-```
+**待补充测试**：
+- OTLP gRPC 导出器测试
+- TLS mTLS 配置测试
+- 高并发指标收集性能测试
+- 网络故障恢复测试
 
 ---
 
-## 7. 附录
+## 附录：指标名称清单
 
-### 7.1 指标名称常量列表
+### Tool 相关
+- `codex.tool.call` - 工具调用次数
+- `codex.tool.call.duration_ms` - 工具调用耗时
 
-```rust
-// src/metrics/names.rs
-pub const TOOL_CALL_COUNT_METRIC: &str = "codex.tool.call";
-pub const TOOL_CALL_DURATION_METRIC: &str = "codex.tool.call.duration_ms";
-pub const API_CALL_COUNT_METRIC: &str = "codex.api_request";
-pub const API_CALL_DURATION_METRIC: &str = "codex.api_request.duration_ms";
-pub const SSE_EVENT_COUNT_METRIC: &str = "codex.sse_event";
-pub const SSE_EVENT_DURATION_METRIC: &str = "codex.sse_event.duration_ms";
-pub const WEBSOCKET_REQUEST_COUNT_METRIC: &str = "codex.websocket.request";
-pub const WEBSOCKET_REQUEST_DURATION_METRIC: &str = "codex.websocket.request.duration_ms";
-pub const WEBSOCKET_EVENT_COUNT_METRIC: &str = "codex.websocket.event";
-pub const WEBSOCKET_EVENT_DURATION_METRIC: &str = "codex.websocket.event.duration_ms";
-pub const RESPONSES_API_OVERHEAD_DURATION_METRIC: &str = "codex.responses_api_overhead.duration_ms";
-pub const RESPONSES_API_INFERENCE_TIME_DURATION_METRIC: &str = "codex.responses_api_inference_time.duration_ms";
-pub const RESPONSES_API_ENGINE_IAPI_TTFT_DURATION_METRIC: &str = "codex.responses_api_engine_iapi_ttft.duration_ms";
-pub const RESPONSES_API_ENGINE_SERVICE_TTFT_DURATION_METRIC: &str = "codex.responses_api_engine_service_ttft.duration_ms";
-pub const RESPONSES_API_ENGINE_IAPI_TBT_DURATION_METRIC: &str = "codex.responses_api_engine_iapi_tbt.duration_ms";
-pub const RESPONSES_API_ENGINE_SERVICE_TBT_DURATION_METRIC: &str = "codex.responses_api_engine_service_tbt.duration_ms";
-pub const TURN_E2E_DURATION_METRIC: &str = "codex.turn.e2e_duration_ms";
-pub const TURN_TTFT_DURATION_METRIC: &str = "codex.turn.ttft.duration_ms";
-pub const TURN_TTFM_DURATION_METRIC: &str = "codex.turn.ttfm.duration_ms";
-pub const TURN_NETWORK_PROXY_METRIC: &str = "codex.turn.network_proxy";
-pub const TURN_TOOL_CALL_METRIC: &str = "codex.turn.tool.call";
-pub const TURN_TOKEN_USAGE_METRIC: &str = "codex.turn.token_usage";
-pub const STARTUP_PREWARM_DURATION_METRIC: &str = "codex.startup_prewarm.duration_ms";
-pub const STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC: &str = "codex.startup_prewarm.age_at_first_turn_ms";
-pub const THREAD_STARTED_METRIC: &str = "codex.thread.started";
-```
+### API 相关
+- `codex.api_request` - API 请求次数
+- `codex.api_request.duration_ms` - API 请求耗时
 
-### 7.2 会话标签常量列表
+### SSE 相关
+- `codex.sse_event` - SSE 事件次数
+- `codex.sse_event.duration_ms` - SSE 事件处理耗时
 
-```rust
-// src/metrics/tags.rs
-pub const APP_VERSION_TAG: &str = "app.version";
-pub const AUTH_MODE_TAG: &str = "auth_mode";
-pub const MODEL_TAG: &str = "model";
-pub const ORIGINATOR_TAG: &str = "originator";
-pub const SERVICE_NAME_TAG: &str = "service_name";
-pub const SESSION_SOURCE_TAG: &str = "session_source";
-```
+### WebSocket 相关
+- `codex.websocket.request` - WebSocket 请求次数
+- `codex.websocket.request.duration_ms` - WebSocket 请求耗时
+- `codex.websocket.event` - WebSocket 事件次数
+- `codex.websocket.event.duration_ms` - WebSocket 事件处理耗时
 
----
+### Responses API 性能细分
+- `codex.responses_api_overhead.duration_ms` - 除引擎和工具外的开销
+- `codex.responses_api_inference_time.duration_ms` - 推理时间
+- `codex.responses_api_engine_iapi_ttft.duration_ms` - 引擎内部 API 首 Token 时间
+- `codex.responses_api_engine_service_ttft.duration_ms` - 引擎服务首 Token 时间
+- `codex.responses_api_engine_iapi_tbt.duration_ms` - 引擎内部 API  Token 间隔
+- `codex.responses_api_engine_service_tbt.duration_ms` - 引擎服务 Token 间隔
 
-*文档生成时间：2026-03-21*
-*研究对象：codex-rs/otel 目录*
-*版本：基于仓库最新 main 分支*
+### Turn 级别
+- `codex.turn.e2e_duration_ms` - Turn 端到端耗时
+- `codex.turn.ttft.duration_ms` - 首 Token 时间
+- `codex.turn.ttfm.duration_ms` - 首消息时间
+- `codex.turn.network_proxy` - 网络代理相关
+- `codex.turn.tool.call` - Turn 内工具调用
+- `codex.turn.token_usage` - Token 使用量
+
+### 其他
+- `codex.startup_prewarm.duration_ms` - 启动预热耗时
+- `codex.startup_prewarm.age_at_first_turn_ms` - 首次 Turn 时预热年龄
+- `codex.thread.started` - 线程启动次数
