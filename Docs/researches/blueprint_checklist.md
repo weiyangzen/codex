@@ -2487,11 +2487,11 @@ Legend: `[ ]` pending, `[x]` researched.
 - [ ] [FILE] codex-rs/protocol/src/permissions.rs
 - [ ] [FILE] codex-rs/protocol/src/plan_tool.rs
 - [ ] [FILE] codex-rs/protocol/src/prompts/base_instructions/default.md
-- [ ] [FILE] codex-rs/protocol/src/prompts/permissions/approval_policy/never.md
-- [ ] [FILE] codex-rs/protocol/src/prompts/permissions/approval_policy/on_failure.md
-- [ ] [FILE] codex-rs/protocol/src/prompts/permissions/approval_policy/on_request_rule.md
-- [ ] [FILE] codex-rs/protocol/src/prompts/permissions/approval_policy/on_request_rule_request_permission.md
-- [ ] [FILE] codex-rs/protocol/src/prompts/permissions/approval_policy/unless_trusted.md
+- [x] [FILE] codex-rs/protocol/src/prompts/permissions/approval_policy/never.md
+- [x] [FILE] codex-rs/protocol/src/prompts/permissions/approval_policy/on_failure.md
+- [x] [FILE] codex-rs/protocol/src/prompts/permissions/approval_policy/on_request_rule.md
+- [x] [FILE] codex-rs/protocol/src/prompts/permissions/approval_policy/on_request_rule_request_permission.md
+- [x] [FILE] codex-rs/protocol/src/prompts/permissions/approval_policy/unless_trusted.md
 - [ ] [FILE] codex-rs/protocol/src/prompts/permissions/sandbox_mode/danger_full_access.md
 - [ ] [FILE] codex-rs/protocol/src/prompts/permissions/sandbox_mode/read_only.md
 - [ ] [FILE] codex-rs/protocol/src/prompts/permissions/sandbox_mode/workspace_write.md

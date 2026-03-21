@@ -1,107 +1,192 @@
 # DIR Research: codex-rs/protocol/src/prompts/permissions/approval_policy
 
+## 概述
+
+本目录包含 Codex 项目中用于指导 AI 模型理解命令执行审批策略（Approval Policy）的提示词模板文件。这些 Markdown 文件被编译时嵌入到 Rust 代码中，作为系统提示词（System Prompts）的一部分，告知模型在不同审批策略下如何请求用户批准执行命令。
+
+---
+
 ## 场景与职责
 
-该目录包含 Codex CLI 的**命令执行审批策略提示模板**，用于指导 AI 模型在不同审批策略下如何请求用户授权执行 shell 命令。这些模板被嵌入到发送给模型的 developer instructions 中，是 Codex 安全架构的关键组成部分。
+### 业务场景
 
-**核心职责：**
-1. 定义不同审批策略下模型应如何请求命令执行权限
-2. 指导模型何时应该请求权限提升（escalation）
-3. 规范 `prefix_rule` 的使用，允许用户持久化批准特定命令前缀
-4. 支持 `request_permissions` 工具的使用指导
+Codex 是一个 AI 编程助手，需要执行用户请求的各种 shell 命令。由于这些命令可能具有破坏性（如 `rm -rf`）或需要超出沙箱限制的权限，系统需要一套机制来控制命令执行前的审批流程。
 
-**使用场景：**
-- 用户通过 CLI 或 TUI 与 Codex 交互时，系统根据配置的 `approval_policy` 加载对应的提示模板
-- 模型根据这些指导决定何时需要请求用户批准执行命令
-- 在安全沙箱环境中，指导模型如何请求额外的权限
+### 核心职责
+
+1. **模型行为指导**: 告知 AI 模型当前审批策略的具体规则
+2. **用户授权流程**: 指导模型何时、如何向用户请求执行许可
+3. **权限升级机制**: 说明如何从受限沙箱执行升级到无沙箱执行
+4. **规则持久化**: 指导用户如何设置持久化的命令前缀批准规则
+
+### 审批策略类型
+
+| 策略 | 说明 | 使用场景 |
+|------|------|----------|
+| `never` | 从不请求用户批准，命令失败直接返回给模型 | 自动化/CI 场景 |
+| `unless-trusted` | 仅对"已知安全"的只读命令自动批准，其他需审批 | 高安全要求场景 |
+| `on-failure` | 所有命令在沙箱内运行，失败后才请求批准重试 | 已废弃，不推荐使用 |
+| `on-request` | 由模型决定何时请求批准（默认策略） | 交互式使用场景 |
+| `granular` | 细粒度控制，可分别启用/禁用各类审批 | 高级定制场景 |
 
 ---
 
 ## 功能点目的
 
-### 1. never.md - 完全禁止审批策略
+### 1. never.md
 
-**目的：** 当 `approval_policy` 设置为 `never` 时，告知模型不提供 `sandbox_permissions` 参数，所有命令将被拒绝。
+**目的**: 告知模型在 `approval_policy=never` 模式下不应请求任何权限升级。
 
-**内容：**
+**内容**:
 ```
 Approval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.
 ```
 
-**使用场景：** 非交互式环境或完全自动化的 CI/CD 场景，禁止任何需要用户交互的命令执行。
+**技术实现**:
+- 在 `DeveloperInstructions::from()` 中当 `AskForApproval::Never` 时加载
+- 模型被告知不提供 `sandbox_permissions` 参数
+- 任何权限请求都会被系统拒绝
 
-### 2. unless_trusted.md - 非信任命令需审批
+### 2. unless_trusted.md
 
-**目的：** 当 `approval_policy` 设置为 `unless-trusted` 时，告知模型大部分命令需要用户批准，只有有限的安全"读取"命令白名单可以自动执行。
+**目的**: 告知模型 `unless-trusted` 策略下，只有有限的"安全读取"命令可自动执行，其他需用户批准。
 
-**内容：**
+**内容**:
 ```
 Approvals are your mechanism to get user consent to run shell commands without the sandbox. `approval_policy` is `unless-trusted`: The harness will escalate most commands for user approval, apart from a limited allowlist of safe "read" commands.
 ```
 
-**使用场景：** 交互式开发环境，用户希望保持控制但允许安全的读取操作自动执行。
+**技术实现**:
+- 与 `request_permissions` 工具说明组合使用
+- 依赖 `is_known_safe_command()` 函数判断命令安全性
+- 非安全命令触发 `ExecApprovalRequirement::NeedsApproval`
 
-### 3. on_failure.md - 失败时请求审批
+### 3. on_failure.md
 
-**目的：** 当 `approval_policy` 设置为 `on-failure` 时，告知模型所有命令先在沙箱中运行，失败时再升级请求用户批准无沙箱运行。
+**目的**: 说明 `on-failure` 策略下，命令先在沙箱内运行，失败后才请求用户批准无沙箱重试。
 
-**内容：**
+**内容**:
 ```
 Approvals are your mechanism to get user consent to run shell commands without the sandbox. `approval_policy` is `on-failure`: The harness will allow all commands to run in the sandbox (if enabled), and failures will be escalated to the user for approval to run again without the sandbox.
 ```
 
-**使用场景：** 希望最大化自动化，只在必要时才打扰用户。
+**技术实现**:
+- 已标记为 DEPRECATED
+- 通过 `render_decision_for_unmatched_command()` 实现
+- 沙箱失败后触发 `ExecApprovalRequirement::NeedsApproval`
 
-### 4. on_request_rule.md - 按需请求审批（基础版）
+### 4. on_request_rule.md
 
-**目的：** 当 `approval_policy` 设置为 `on-request` 且未启用 `request_permissions` 工具时，提供详细的权限升级指导。
+**目的**: 详细说明 `on-request` 策略下的权限升级请求机制，包括命令分段、请求方式、prefix_rule 指导等。
 
-**关键功能点：**
-- **命令分段逻辑：** 命令在管道符、逻辑运算符、分号、子shell边界处被分割为独立段，每段独立评估
-- **权限升级请求方式：**
-  - 使用 `sandbox_permissions: "require_escalated"`
-  - 在 `justification` 参数中包含简短问题询问用户
-  - 可选提供 `prefix_rule` 建议持久化规则
-- **何时请求升级：**
-  - 需要写入受限目录（如 `/var`）
-  - 需要运行 GUI 应用
-  - 沙箱相关网络错误（DNS、注册表访问、依赖下载失败）
-  - 潜在的破坏性操作（`rm`、`git reset`）
-- **prefix_rule 指导：**
-  - 禁止：`["python3"]`、`["python", "-"]` 等过于宽泛的前缀
-  - 禁止为破坏性命令（如 `rm`）提供 prefix_rule
-  - 禁止使用 heredoc 或 herestring 时提供 prefix_rule
-  - 推荐：`["npm", "run", "dev"]`、`["pytest"]`、`["cargo", "test"]` 等
+**核心内容**:
+- **命令分段**: 在 `|`, `&&`, `||`, `;`, `$(...)` 等操作符处分割命令
+- **升级请求方式**: 使用 `sandbox_permissions: "require_escalated"` + `justification`
+- **prefix_rule**: 建议可持久化的命令前缀规则
+- **禁止的前缀**: 如 `python3`, `bash`, `git` 等过于宽泛的前缀
 
-### 5. on_request_rule_request_permission.md - 按需请求审批（完整版）
+**技术实现**:
+```rust
+// 命令分段解析
+fn commands_for_exec_policy(command: &[String]) -> (Vec<Vec<String>>, bool) {
+    if let Some(commands) = parse_shell_lc_plain_commands(command) {
+        return (commands, false);
+    }
+    // 回退处理...
+}
 
-**目的：** 当 `approval_policy` 设置为 `on-request` 且启用了 `request_permissions` 工具时，提供更全面的权限管理指导。
+// prefix_rule 验证
+static BANNED_PREFIX_SUGGESTIONS: &[&[&str]] = &[
+    &["python3"],
+    &["bash"],
+    &["git"],
+    // ...
+];
+```
 
-**额外功能：**
-- **首选请求模式：** 优先使用 `sandbox_permissions: "with_additional_permissions"` 和 `additional_permissions` 参数请求沙箱内额外权限
-- **支持的网络权限：** `network.enabled`
-- **支持的文件系统权限：** `file_system.read`、`file_system.write`
-- **完整升级请求：** 当沙箱内权限无法满足时才使用 `require_escalated`
+### 5. on_request_rule_request_permission.md
+
+**目的**: 当启用 `request_permissions` 工具时，指导模型优先使用细粒度权限请求而非完全升级。
+
+**核心内容**:
+- **首选模式**: `sandbox_permissions: "with_additional_permissions"`
+- **额外权限类型**: `network.enabled`, `file_system.read`, `file_system.write`
+- **完整升级**: 仅在细粒度权限不足时使用 `require_escalated`
+
+**技术实现**:
+- 通过 `Feature::RequestPermissionsTool` 特性开关控制
+- 在 `apply_granted_turn_permissions()` 中处理权限应用
+- 与 `GranularApprovalConfig.request_permissions` 配置联动
 
 ---
 
 ## 具体技术实现
 
-### 模板加载与使用流程
+### 关键数据结构
+
+#### AskForApproval (协议层)
 
 ```rust
-// 在 codex-rs/protocol/src/models.rs 中定义
+// codex-rs/protocol/src/protocol.rs
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum AskForApproval {
+    #[serde(rename = "untrusted")]
+    #[strum(serialize = "untrusted")]
+    UnlessTrusted,
+    
+    OnFailure,  // DEPRECATED
+    
+    #[default]
+    OnRequest,
+    
+    #[strum(serialize = "granular")]
+    Granular(GranularApprovalConfig),
+    
+    Never,
+}
+```
+
+#### GranularApprovalConfig
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GranularApprovalConfig {
+    pub sandbox_approval: bool,      // shell 命令审批
+    pub rules: bool,                 // execpolicy 规则触发的审批
+    pub skill_approval: bool,        // skill 脚本执行审批
+    pub request_permissions: bool,   // request_permissions 工具审批
+    pub mcp_elicitations: bool,      // MCP elicitation 审批
+}
+```
+
+#### SandboxPermissions (模型层)
+
+```rust
+// codex-rs/protocol/src/models.rs
+#[derive(Debug, Clone, Copy, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxPermissions {
+    #[default]
+    UseDefault,                    // 使用回合配置的沙箱策略
+    RequireEscalated,              // 请求无沙箱执行
+    WithAdditionalPermissions,     // 在沙箱内扩展权限
+}
+```
+
+### 关键流程
+
+#### 1. 提示词加载流程
+
+```rust
+// codex-rs/protocol/src/models.rs
 const APPROVAL_POLICY_NEVER: &str = include_str!("prompts/permissions/approval_policy/never.md");
 const APPROVAL_POLICY_UNLESS_TRUSTED: &str = include_str!("prompts/permissions/approval_policy/unless_trusted.md");
 const APPROVAL_POLICY_ON_FAILURE: &str = include_str!("prompts/permissions/approval_policy/on_failure.md");
 const APPROVAL_POLICY_ON_REQUEST_RULE: &str = include_str!("prompts/permissions/approval_policy/on_request_rule.md");
 const APPROVAL_POLICY_ON_REQUEST_RULE_REQUEST_PERMISSION: &str = include_str!("prompts/permissions/approval_policy/on_request_rule_request_permission.md");
-```
 
-### DeveloperInstructions 生成逻辑
-
-```rust
-// DeveloperInstructions::from() 方法
 impl DeveloperInstructions {
     pub fn from(
         approval_policy: AskForApproval,
@@ -109,23 +194,6 @@ impl DeveloperInstructions {
         exec_permission_approvals_enabled: bool,
         request_permissions_tool_enabled: bool,
     ) -> DeveloperInstructions {
-        let with_request_permissions_tool = |text: &str| {
-            if request_permissions_tool_enabled {
-                format!("{text}\n\n{}", request_permissions_tool_prompt_section())
-            } else {
-                text.to_string()
-            }
-        };
-        
-        let on_request_instructions = || {
-            let on_request_rule = if exec_permission_approvals_enabled {
-                APPROVAL_POLICY_ON_REQUEST_RULE_REQUEST_PERMISSION.to_string()
-            } else {
-                APPROVAL_POLICY_ON_REQUEST_RULE.to_string()
-            };
-            // ... 构建完整指令
-        };
-        
         let text = match approval_policy {
             AskForApproval::Never => APPROVAL_POLICY_NEVER.to_string(),
             AskForApproval::UnlessTrusted => with_request_permissions_tool(APPROVAL_POLICY_UNLESS_TRUSTED),
@@ -133,70 +201,85 @@ impl DeveloperInstructions {
             AskForApproval::OnRequest => on_request_instructions(),
             AskForApproval::Granular(granular_config) => granular_instructions(...),
         };
-        
         DeveloperInstructions::new(text)
     }
 }
 ```
 
-### 相关数据结构
-
-#### AskForApproval 枚举
+#### 2. 审批决策流程
 
 ```rust
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Display, JsonSchema, TS)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum AskForApproval {
-    /// 只有"已知安全"的命令自动批准，其他都需要询问
-    #[serde(rename = "untrusted")]
-    #[strum(serialize = "untrusted")]
-    UnlessTrusted,
-
-    /// 所有命令在沙箱中自动运行，失败时升级
-    OnFailure,
-
-    /// 模型决定何时询问（默认）
-    #[default]
-    OnRequest,
-
-    /// 细粒度控制
-    #[strum(serialize = "granular")]
-    Granular(GranularApprovalConfig),
-
-    /// 从不询问，直接返回失败
-    Never,
+// codex-rs/core/src/exec_policy.rs
+pub(crate) async fn create_exec_approval_requirement_for_command(
+    &self,
+    req: ExecApprovalRequest<'_>,
+) -> ExecApprovalRequirement {
+    let exec_policy = self.current();
+    let (commands, used_complex_parsing) = commands_for_exec_policy(command);
+    
+    // 执行策略检查
+    let evaluation = exec_policy.check_multiple_with_options(
+        commands.iter(),
+        &exec_policy_fallback,
+        &match_options,
+    );
+    
+    match evaluation.decision {
+        Decision::Forbidden => ExecApprovalRequirement::Forbidden { reason },
+        Decision::Prompt => {
+            // 检查 Granular 配置是否允许
+            match prompt_is_rejected_by_policy(approval_policy, prompt_is_rule) {
+                Some(reason) => ExecApprovalRequirement::Forbidden { reason },
+                None => ExecApprovalRequirement::NeedsApproval { reason, proposed_execpolicy_amendment },
+            }
+        }
+        Decision::Allow => ExecApprovalRequirement::Skip { bypass_sandbox, proposed_execpolicy_amendment },
+    }
 }
 ```
 
-#### SandboxPermissions 枚举
+#### 3. 命令分段解析
 
 ```rust
-#[derive(Debug, Clone, Copy, Default, Eq, Hash, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxPermissions {
-    /// 使用回合配置的默认沙箱策略
-    #[default]
-    UseDefault,
-    /// 请求在无沙箱环境下运行
-    RequireEscalated,
-    /// 请求在沙箱内但放宽权限
-    WithAdditionalPermissions,
+// codex-rs/core/src/exec_policy.rs
+fn commands_for_exec_policy(command: &[String]) -> (Vec<Vec<String>>, bool) {
+    // 尝试解析 bash -lc 内部的普通命令
+    if let Some(commands) = parse_shell_lc_plain_commands(command) {
+        return (commands, false);
+    }
+    
+    // 尝试提取单条命令前缀
+    if let Some(single_command) = parse_shell_lc_single_command_prefix(command) {
+        return (vec![single_command], true);
+    }
+    
+    // 回退：返回原始命令
+    (vec![command.to_vec()], false)
 }
 ```
 
-#### ShellToolCallParams 结构体
+#### 4. Granular 策略处理
 
 ```rust
-#[derive(Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
-pub struct ShellToolCallParams {
-    pub command: Vec<String>,
-    pub workdir: Option<String>,
-    pub timeout_ms: Option<u64>,
-    pub sandbox_permissions: Option<SandboxPermissions>,
-    pub prefix_rule: Option<Vec<String>>,
-    pub additional_permissions: Option<PermissionProfile>,
-    pub justification: Option<String>,
+fn granular_instructions(
+    granular_config: GranularApprovalConfig,
+    exec_policy: &Policy,
+    exec_permission_approvals_enabled: bool,
+    request_permissions_tool_enabled: bool,
+) -> String {
+    let categories = [
+        (granular_config.allows_sandbox_approval(), "`sandbox_approval`"),
+        (granular_config.allows_rules_approval(), "`rules`"),
+        (granular_config.allows_skill_approval(), "`skill_approval`"),
+        (granular_config.allows_request_permissions(), "`request_permissions`"),
+        (granular_config.allows_mcp_elicitations(), "`mcp_elicitations`"),
+    ];
+    
+    // 生成提示词，区分允许和禁止的类别
+    let prompted_categories = categories.iter().filter(|(allowed, _)| *allowed).collect();
+    let rejected_categories = categories.iter().filter(|(allowed, _)| !*allowed).collect();
+    
+    // 组合最终提示词...
 }
 ```
 
@@ -204,74 +287,57 @@ pub struct ShellToolCallParams {
 
 ## 关键代码路径与文件引用
 
-### 核心文件
+### 提示词定义文件
 
-| 文件 | 作用 |
+| 文件 | 用途 | 加载位置 |
+|------|------|----------|
+| `never.md` | Never 策略提示词 | `models.rs:475` |
+| `unless_trusted.md` | UnlessTrusted 策略提示词 | `models.rs:476-477` |
+| `on_failure.md` | OnFailure 策略提示词 | `models.rs:478-479` |
+| `on_request_rule.md` | OnRequest 策略基础提示词 | `models.rs:480-481` |
+| `on_request_rule_request_permission.md` | OnRequest + RequestPermissions 工具提示词 | `models.rs:482-483` |
+
+### 核心代码文件
+
+| 文件 | 职责 |
 |------|------|
-| `codex-rs/protocol/src/prompts/permissions/approval_policy/never.md` | 完全禁止审批策略模板 |
-| `codex-rs/protocol/src/prompts/permissions/approval_policy/unless_trusted.md` | 非信任命令需审批模板 |
-| `codex-rs/protocol/src/prompts/permissions/approval_policy/on_failure.md` | 失败时请求审批模板 |
-| `codex-rs/protocol/src/prompts/permissions/approval_policy/on_request_rule.md` | 按需请求审批基础模板 |
-| `codex-rs/protocol/src/prompts/permissions/approval_policy/on_request_rule_request_permission.md` | 按需请求审批完整模板 |
-| `codex-rs/protocol/src/models.rs` | 模板加载和 DeveloperInstructions 生成 |
-| `codex-rs/protocol/src/protocol.rs` | AskForApproval 枚举定义 |
-| `codex-rs/protocol/src/approvals.rs` | 审批相关事件和结构体 |
-| `codex-rs/protocol/src/permissions.rs` | 文件系统和网络沙箱策略 |
+| `codex-rs/protocol/src/models.rs` | 提示词加载、DeveloperInstructions 生成 |
+| `codex-rs/protocol/src/protocol.rs` | `AskForApproval` 枚举定义 |
+| `codex-rs/core/src/exec_policy.rs` | 执行策略管理、审批决策逻辑 |
+| `codex-rs/core/src/tools/sandboxing.rs` | 工具运行时审批抽象 |
+| `codex-rs/core/src/tools/handlers/shell.rs` | shell 命令处理、审批请求发起 |
+| `codex-rs/execpolicy/src/decision.rs` | 底层决策枚举 (`Allow`/`Prompt`/`Forbidden`) |
 
-### 调用链
+### 测试文件
 
-```
-1. CLI/TUI 启动时配置 approval_policy
-   ↓
-2. codex-core 创建 CodexThread 时传入配置
-   ↓
-3. 每轮对话开始时生成 DeveloperInstructions
-   ↓
-4. DeveloperInstructions::from() 根据 approval_policy 选择对应模板
-   ↓
-5. 模板内容嵌入到发送给模型的 developer message
-   ↓
-6. 模型根据指导决定何时请求权限
-   ↓
-7. 模型调用 shell 工具时传入 sandbox_permissions/justification/prefix_rule
-   ↓
-8. exec_policy 评估命令并决定是否触发审批流程
-```
-
-### 测试覆盖
-
-- `codex-rs/core/tests/suite/approvals.rs` - 审批流程测试
-- `codex-rs/core/tests/suite/request_permissions.rs` - 权限请求测试
-- `codex-rs/core/tests/suite/exec_policy.rs` - 执行策略测试
-- `codex-rs/protocol/src/models.rs` 中的单元测试 - DeveloperInstructions 生成测试
+| 文件 | 测试范围 |
+|------|----------|
+| `codex-rs/core/src/exec_policy_tests.rs` | 执行策略单元测试 |
+| `codex-rs/core/tests/suite/approvals.rs` | 端到端审批流程测试 |
+| `codex-rs/protocol/src/models.rs` (mod tests) | DeveloperInstructions 生成测试 |
 
 ---
 
 ## 依赖与外部交互
 
-### 内部依赖
+### 上游依赖
 
-| 模块 | 依赖关系 |
-|------|----------|
-| `codex-execpolicy` | 执行策略评估，`Decision` 枚举（Allow/Prompt/Forbidden）|
-| `codex-protocol` | 本目录所属 crate，提供协议类型定义 |
-| `codex-core` | 使用 DeveloperInstructions 构建对话上下文 |
-| `codex-utils-absolute-path` | 路径处理 |
+1. **codex_execpolicy crate**: 提供底层的 `Policy`, `Decision`, `RuleMatch` 等类型
+2. **config 层**: `ConfigLayerStack` 提供用户配置的审批策略
+3. **feature 系统**: `Feature::ExecPermissionApprovals`, `Feature::RequestPermissionsTool` 控制功能开关
 
-### 外部交互
+### 下游消费
 
-| 交互方 | 交互方式 |
-|--------|----------|
-| OpenAI API | 模板内容通过 developer message 发送给模型 |
-| 用户 | 通过 CLI/TUI 响应审批请求 |
-| 配置文件 | `approval_policy` 从 config.toml 读取 |
+1. **AI 模型**: 通过 `DeveloperInstructions` 注入到系统提示词中
+2. **工具运行时**: `ToolOrchestrator` 根据审批要求决定是否执行
+3. **UI 层**: `ExecApprovalRequestEvent` 发送到客户端请求用户确认
 
 ### 配置关联
 
 ```toml
-# ~/.codex/config.toml 示例
+# config.toml 示例
 [permissions]
-approval_policy = "on-request"  # 可选: never, unless-trusted, on-failure, on-request
+approval_policy = "on-request"  # 或 "never", "unless-trusted", "granular"
 
 [permissions.granular]
 sandbox_approval = true
@@ -285,70 +351,87 @@ mcp_elicitations = true
 
 ## 风险、边界与改进建议
 
-### 潜在风险
+### 已知风险
 
-1. **提示注入风险**
-   - 用户输入可能通过某种方式影响模型对审批策略的理解
-   - 缓解：模板内容固定，不直接包含用户输入
+1. **提示词注入风险**: 如果用户可控内容被嵌入到提示词中，可能导致提示词注入攻击
+   - 缓解: 所有提示词内容均为硬编码，不包含用户输入
 
-2. **模型误解风险**
-   - 模型可能错误理解 `prefix_rule` 的使用限制
-   - 缓解：模板中明确禁止某些危险的 prefix_rule 模式
+2. **策略不一致风险**: 代码逻辑与提示词描述可能不一致
+   - 缓解: `approvals.rs` 包含端到端测试覆盖所有策略组合
 
-3. **过度授权风险**
-   - 用户可能批准过于宽泛的 prefix_rule（如 `["python3"]`）
-   - 缓解：模板明确警告不要批准过于宽泛的前缀
-
-4. **沙箱逃逸风险**
-   - 如果模型不正确使用 `sandbox_permissions` 参数
-   - 缓解：后端有独立的 exec_policy 评估层
+3. **模型误解风险**: 模型可能误解审批策略，导致未授权执行
+   - 缓解: 系统层面有 `ExecPolicyManager` 进行二次检查
 
 ### 边界情况
 
-1. **命令分段边界**
-   - 复杂命令如 `git pull | tee output.txt` 被分为多个段
-   - 每段独立评估，可能产生多个审批请求
-
-2. **Granular 策略**
-   - 当使用 `Granular` 策略时，模板内容由 `granular_instructions()` 函数动态生成
-   - 不是直接使用本目录的静态模板
-
-3. **网络审批**
-   - 网络访问审批有独立的 `NetworkApprovalContext` 和 `NetworkPolicyAmendment`
-   - 不通过本目录的模板处理
+1. **空命令处理**: `commands_for_exec_policy` 对空/空白命令有专门回退处理
+2. **Heredoc 命令**: 复杂 shell 结构使用 heredoc 时，`auto_amendment_allowed` 设为 false
+3. **Windows 特殊处理**: `ReadOnly` 沙箱在 Windows 上不提供真正保护，需特殊处理
+4. **Granular 配置冲突**: `sandbox_approval=false` 但 `rules=true` 时的优先级处理
 
 ### 改进建议
 
-1. **模板国际化**
-   - 当前模板只有英文版本
-   - 建议：支持多语言模板，根据用户 locale 自动选择
+1. **文档化策略矩阵**: 当前策略逻辑分散在多个文件中，建议创建一个统一的策略决策矩阵文档
 
-2. **动态示例**
-   - 当前示例是静态的
-   - 建议：根据用户历史行为提供个性化的 prefix_rule 示例
+2. **提示词版本控制**: 考虑为提示词添加版本号，便于追踪模型行为变化
 
-3. **可视化指导**
-   - 纯文本模板可能不够直观
-   - 建议：在 TUI 中提供交互式的权限指导界面
+3. **A/B 测试支持**: 当前提示词为编译时嵌入，可考虑运行时加载以支持提示词 A/B 测试
 
-4. **审批策略继承**
-   - 当前策略是全局的
-   - 建议：支持按项目、按目录继承不同的审批策略
+4. **多语言支持**: 当前提示词仅英文，国际化场景需要考虑多语言提示词
 
-5. **审计日志**
-   - 建议：记录所有审批决策和使用的模板版本，便于安全审计
+5. **策略可视化**: 建议在 CLI/UI 中展示当前生效的审批策略，帮助用户理解系统行为
 
-6. **模板版本控制**
-   - 建议：为模板添加版本号，便于追踪变更和回滚
+6. **prefix_rule 智能建议**: 当前禁止列表为硬编码，可考虑基于命令历史智能建议安全的 prefix_rule
 
 ---
 
-## 总结
+## 附录：审批决策流程图
 
-`approval_policy` 目录是 Codex CLI 安全架构的**策略表达层**，通过精心设计的提示模板，指导 AI 模型在不同场景下正确地请求用户授权。这些模板与底层的 `exec_policy` 执行策略、`SandboxPolicy` 沙箱策略相互配合，形成了完整的安全防护体系。
+```
+用户提交命令
+    │
+    ▼
+┌─────────────────┐
+│ 解析命令分段    │◄─── 在 | && || ; 等处分割
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ 检查 ExecPolicy │◄─── 匹配 prefix_rule, host_executable 等
+│ (codex_execpolicy)│
+└────────┬────────┘
+         │
+    ┌────┴────┐
+    ▼         ▼         ▼
+  Allow     Prompt    Forbidden
+    │         │           │
+    ▼         ▼           ▼
+┌────────┐ ┌──────────┐ ┌──────────┐
+│检查是否 │ │检查      │ │返回      │
+│需要绕过 │ │Granular  │ │Forbidden │
+│沙箱     │ │配置      │ │          │
+└────┬───┘ └────┬─────┘ └──────────┘
+     │          │
+     ▼          ▼
+┌────────┐  ┌──────────┐
+│Skip    │  │Needs     │
+│bypass= │  │Approval  │
+│true/false│ │          │
+└────────┘  └──────────┘
+                 │
+                 ▼
+            ┌──────────┐
+            │发送      │
+            │ExecApproval│
+            │RequestEvent│
+            │到UI      │
+            └──────────┘
+                 │
+                 ▼
+            等待用户决策
+```
 
-模板的设计体现了以下安全原则：
-1. **最小权限原则**：默认使用沙箱，只在必要时请求升级
-2. **用户控制原则**：用户始终保有最终决策权
-3. **透明性原则**：模型必须说明请求权限的理由
-4. **持久化便利**：通过 prefix_rule 减少重复审批
+---
+
+*文档生成时间: 2026-03-21*
+*研究范围: codex-rs/protocol/src/prompts/permissions/approval_policy/*
