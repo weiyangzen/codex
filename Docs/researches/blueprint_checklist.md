@@ -320,7 +320,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/process-hardening
 - [x] [DIR] codex-rs/process-hardening/src
 - [x] [DIR] codex-rs/protocol
-- [ ] [DIR] codex-rs/protocol/src
+- [x] [DIR] codex-rs/protocol/src
 - [ ] [DIR] codex-rs/protocol/src/prompts
 - [ ] [DIR] codex-rs/protocol/src/prompts/base_instructions
 - [ ] [DIR] codex-rs/protocol/src/prompts/permissions
