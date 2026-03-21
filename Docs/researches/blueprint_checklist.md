@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-21 08:42:12 +0800
+Generated at: 2026-03-21 08:46:01 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -276,8 +276,8 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/execpolicy/tests
 - [x] [DIR] codex-rs/feedback
 - [x] [DIR] codex-rs/feedback/src
-- [ ] [DIR] codex-rs/file-search
-- [ ] [DIR] codex-rs/file-search/src
+- [x] [DIR] codex-rs/file-search
+- [x] [DIR] codex-rs/file-search/src
 - [ ] [DIR] codex-rs/hooks
 - [ ] [DIR] codex-rs/hooks/schema
 - [ ] [DIR] codex-rs/hooks/schema/generated
@@ -2304,12 +2304,12 @@ Legend: `[ ]` pending, `[x]` researched.
 - [ ] [FILE] codex-rs/feedback/Cargo.toml
 - [ ] [FILE] codex-rs/feedback/src/feedback_diagnostics.rs
 - [ ] [FILE] codex-rs/feedback/src/lib.rs
-- [ ] [FILE] codex-rs/file-search/BUILD.bazel
-- [ ] [FILE] codex-rs/file-search/Cargo.toml
-- [ ] [FILE] codex-rs/file-search/README.md
-- [ ] [FILE] codex-rs/file-search/src/cli.rs
-- [ ] [FILE] codex-rs/file-search/src/lib.rs
-- [ ] [FILE] codex-rs/file-search/src/main.rs
+- [x] [FILE] codex-rs/file-search/BUILD.bazel
+- [x] [FILE] codex-rs/file-search/Cargo.toml
+- [x] [FILE] codex-rs/file-search/README.md
+- [x] [FILE] codex-rs/file-search/src/cli.rs
+- [x] [FILE] codex-rs/file-search/src/lib.rs
+- [x] [FILE] codex-rs/file-search/src/main.rs
 - [ ] [FILE] codex-rs/hooks/BUILD.bazel
 - [ ] [FILE] codex-rs/hooks/Cargo.toml
 - [ ] [FILE] codex-rs/hooks/schema/generated/session-start.command.input.schema.json
