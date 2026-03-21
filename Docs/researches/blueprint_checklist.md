@@ -1,7 +1,7 @@
 # Research Blueprint Checklist
 
 Project: `codex`
-Generated at: 2026-03-21 12:26:01 +0800
+Generated at: 2026-03-21 12:34:18 +0800
 
 Notes: excludes generated runtime paths `.git/`, `.cron/`, and `Docs/researches/`.
 Legend: `[ ]` pending, `[x]` researched.
@@ -319,7 +319,7 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/package-manager/src
 - [x] [DIR] codex-rs/process-hardening
 - [x] [DIR] codex-rs/process-hardening/src
-- [ ] [DIR] codex-rs/protocol
+- [x] [DIR] codex-rs/protocol
 - [ ] [DIR] codex-rs/protocol/src
 - [ ] [DIR] codex-rs/protocol/src/prompts
 - [ ] [DIR] codex-rs/protocol/src/prompts/base_instructions
