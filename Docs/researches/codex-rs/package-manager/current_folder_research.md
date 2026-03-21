@@ -1,156 +1,125 @@
 # codex-rs/package-manager 深度研究文档
 
-> 研究目标：`codex-rs/package-manager` 目录  
-> 生成时间：2026-03-21  
-> 研究范围：源码、测试、依赖关系、调用方分析
+## 概述
+
+`codex-package-manager` 是 Codex CLI 项目中的通用包管理器 crate，负责版本化运行时 bundle 和其他缓存工件的下载、验证、解压和安装。它提供了一个可扩展的框架，允许不同类型的包（如 artifact runtime）通过实现 `ManagedPackage` trait 来定制自己的行为。
 
 ---
 
-## 1. 场景与职责
+## 一、场景与职责
 
-### 1.1 定位
+### 1.1 核心场景
 
-`codex-package-manager` 是 `codex-rs` 项目中的**通用包管理器 crate**，负责版本化运行时包（runtime bundles）和其他缓存制品的安装管理。它是 `codex-artifacts` crate 的基础依赖，为 Codex 的 Artifact 构建功能提供底层包管理能力。
-
-### 1.2 核心职责
-
-| 职责 | 说明 |
+| 场景 | 描述 |
 |------|------|
-| **平台检测** | 自动检测当前操作系统和架构（macOS/Linux/Windows × x64/ARM64） |
-| **清单获取** | 从远程源获取发布清单（release manifest） |
-| **归档下载** | 下载平台特定的归档文件（.zip / .tar.gz） |
-| **校验验证** | SHA-256 校验和验证、文件大小验证 |
-| **安全解压** | 支持 .zip 和 .tar.gz 格式，带安全检查（路径逃逸、符号链接等） |
-| **缓存管理** | 版本化缓存目录结构，支持自定义缓存根目录 |
-| **并发控制** | 跨进程安装锁，防止并发安装冲突 |
-| **原子升级** | 两阶段升级（隔离-提升-回滚）保证安装原子性 |
+| **Artifact Runtime 安装** | 主要使用场景，从 GitHub Releases 下载特定版本的 artifact runtime（如 `artifact-runtime-v2.5.6`） |
+| **跨平台支持** | 支持 macOS (ARM64/x64)、Linux (ARM64/x64)、Windows (ARM64/x64) 六大平台 |
+| **缓存管理** | 将下载的包缓存到本地文件系统，避免重复下载 |
+| **并发安全** | 通过文件锁确保多进程并发安装时的安全性 |
+| **版本控制** | 支持多版本并存，每个版本独立目录 |
 
-### 1.3 使用场景
+### 1.2 职责边界
 
-1. **Artifact Runtime 安装**：`codex-artifacts` crate 使用此包管理器下载和缓存 JavaScript 运行时（如 Node.js 或自定义 runtime）
-2. **版本化工具分发**：支持 Codex 内部各种平台特定工具的分发和缓存
+**该 crate 负责（通用部分）：**
+- 平台检测（OS + Architecture）
+- Manifest 获取和解析
+- 归档文件下载
+- SHA-256 校验和文件大小验证
+- 归档解压（.zip 和 .tar.gz）
+- 暂存区管理和原子性晋升
+- 跨进程安装锁
+
+**该 crate 不负责（包特定部分）：**
+- Manifest 格式的具体定义
+- 安装后包的验证逻辑
+- 包的具体使用方式
+
+这些包特定的逻辑通过 `ManagedPackage` trait 抽象，由调用方（如 `codex-artifacts`）实现。
 
 ---
 
-## 2. 功能点目的
+## 二、功能点目的
 
-### 2.1 主要公共 API
+### 2.1 主要功能模块
 
-```rust
-// 包管理器核心
-pub struct PackageManager<P> { ... }
-
-// 配置
-pub struct PackageManagerConfig<P> { ... }
-
-// 托管包 trait（由调用方实现）
-pub trait ManagedPackage { ... }
-
-// 平台枚举
-pub enum PackagePlatform { ... }
-
-// 归档元数据
-pub struct PackageReleaseArchive { ... }
-
-// 归档格式
-pub enum ArchiveFormat { Zip, TarGz }
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    PackageManager<P>                         │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────┐  │
+│  │ resolve_cached  │  │ ensure_installed│  │ fetch_*     │  │
+│  │   (快速路径)     │  │   (完整流程)     │  │ (内部方法)   │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+┌──────────────┐    ┌─────────────────┐    ┌──────────────┐
+│   Platform   │    │  Archive Extract │    │   Config     │
+│  Detection   │    │  (zip/tar.gz)   │    │  Management  │
+└──────────────┘    └─────────────────┘    └──────────────┘
 ```
 
-### 2.2 关键方法说明
+### 2.2 核心 API
 
-| 方法 | 目的 |
-|------|------|
-| `PackageManager::resolve_cached()` | 检查本地缓存，返回已验证的已安装包（快速路径） |
-| `PackageManager::ensure_installed()` | 确保包已安装，必要时下载和安装（完整流程） |
-| `ManagedPackage::load_installed()` | 包特定的加载和验证逻辑 |
-| `ManagedPackage::platform_archive()` | 从清单中选择当前平台的归档 |
+| API | 用途 |
+|-----|------|
+| `PackageManager::resolve_cached()` | 检查本地缓存，返回已安装的包（如果有效） |
+| `PackageManager::ensure_installed()` | 确保包已安装，必要时下载并安装 |
+| `PackageManagerConfig::with_cache_root()` | 自定义缓存根目录 |
 
 ### 2.3 安全特性
 
 | 特性 | 实现 |
 |------|------|
-| **路径逃逸防护** | ZIP 使用 `enclosed_name()` 检查；TAR 使用 `safe_extract_path()` 过滤 `..` 和根路径 |
-| **符号链接拒绝** | TAR 提取明确拒绝符号链接、硬链接、设备文件、FIFO 等 |
-| **可执行权限保留** | ZIP 提取在 Unix 系统上保留 `unix_mode` 权限 |
+| **路径遍历防护** | ZIP 解压使用 `enclosed_name()` 检查；TAR 解压使用 `safe_extract_path()` 过滤 `..` 和根路径 |
+| **符号链接拒绝** | TAR 解压明确拒绝 symlink、hard link、device files、FIFOs |
 | **校验验证** | 强制 SHA-256 校验，可选文件大小验证 |
+| **原子性安装** | 使用"隔离-晋升-清理"三阶段确保安装原子性 |
+| **并发控制** | 基于文件的读写锁（`fd-lock` crate） |
 
 ---
 
-## 3. 具体技术实现
+## 三、具体技术实现
 
-### 3.1 关键流程
+### 3.1 关键数据结构
 
-#### 3.1.1 安装流程 (`ensure_installed`)
-
-```
-1. 快速检查缓存 (resolve_cached)
-   ↓ 缓存未命中
-2. 获取平台信息 (PackagePlatform::detect_current)
-   ↓
-3. 获取安装锁 (fd_lock::RwLock，轮询间隔 50ms)
-   ↓ 获取锁后再次检查缓存（其他进程可能已完成安装）
-4. 获取远程清单 (fetch_release_manifest)
-   ↓
-5. 验证清单版本匹配
-   ↓
-6. 选择平台归档 (platform_archive)
-   ↓
-7. 下载归档 (download_bytes)
-   ↓
-8. 验证大小和 SHA-256
-   ↓
-9. 创建临时解压目录 (tempdir_in)
-   ↓
-10. 解压归档 (extract_archive)
-    ↓
-11. 检测包根目录 (detect_extracted_root)
-    ↓
-12. 包特定验证 (load_installed)
-    ↓
-13. 隔离现有安装 (quarantine_existing_install)
-    ↓
-14. 提升临时安装到目标位置 (promote_staged_install)
-    ↓
-15. 最终验证 (load_installed)
-    ↓
-16. 清理隔离目录
-```
-
-#### 3.1.2 两阶段升级与回滚
+#### PackagePlatform（平台枚举）
 
 ```rust
-// 阶段 1: 隔离现有安装
-let quarantined = quarantine_existing_install(&install_dir).await?;
-
-// 阶段 2: 尝试提升新安装
-match promote_staged_install(&extracted_root, &install_dir).await {
-    Ok(()) => { /* 成功，删除隔离目录 */ }
-    Err(e) => {
-        // 失败时恢复隔离的安装
-        restore_quarantined_install(&install_dir, quarantined.as_deref(), &e).await?;
-    }
+// src/platform.rs
+pub enum PackagePlatform {
+    DarwinArm64,   // macOS Apple Silicon
+    DarwinX64,     // macOS Intel
+    LinuxArm64,    // Linux ARM64
+    LinuxX64,      // Linux x86_64
+    WindowsArm64,  // Windows ARM64
+    WindowsX64,    // Windows x86_64
 }
 ```
 
-隔离目录命名格式：`.{install_name}.replaced-{pid}-{suffix}`
+通过 `std::env::consts::OS` 和 `std::env::consts::ARCH` 在运行时检测当前平台。
 
-### 3.2 数据结构
-
-#### 3.2.1 PackageReleaseArchive（归档元数据）
+#### PackageReleaseArchive（归档元数据）
 
 ```rust
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+// src/archive.rs
 pub struct PackageReleaseArchive {
-    pub archive: String,       // 归档文件名
-    pub sha256: String,        // SHA-256 校验和
+    pub archive: String,       // 文件名
+    pub sha256: String,        // SHA-256 校验值
     pub format: ArchiveFormat, // zip 或 tar.gz
     pub size_bytes: Option<u64>, // 可选文件大小
 }
+
+pub enum ArchiveFormat {
+    Zip,
+    TarGz,
+}
 ```
 
-#### 3.2.2 ManagedPackage Trait（包契约）
+#### ManagedPackage Trait（核心抽象）
 
 ```rust
+// src/package.rs
 pub trait ManagedPackage: Clone {
     type Error: From<PackageManagerError>;
     type Installed: Clone;
@@ -162,237 +131,399 @@ pub trait ManagedPackage: Clone {
     fn manifest_url(&self) -> Result<Url, PackageManagerError>;
     fn archive_url(&self, archive: &PackageReleaseArchive) -> Result<Url, PackageManagerError>;
 
-    // 版本提取
+    // Manifest 处理
     fn release_version<'a>(&self, manifest: &'a Self::ReleaseManifest) -> &'a str;
-    fn installed_version<'a>(&self, package: &'a Self::Installed) -> &'a str;
-
-    // 平台选择和安装路径
     fn platform_archive(&self, manifest: &Self::ReleaseManifest, platform: PackagePlatform) 
         -> Result<PackageReleaseArchive, Self::Error>;
-    fn install_dir(&self, cache_root: &Path, platform: PackagePlatform) -> PathBuf;
 
-    // 加载和验证
+    // 安装目录和加载
+    fn install_dir(&self, cache_root: &Path, platform: PackagePlatform) -> PathBuf;
+    fn installed_version<'a>(&self, package: &'a Self::Installed) -> &'a str;
     fn load_installed(&self, root_dir: PathBuf, platform: PackagePlatform) 
         -> Result<Self::Installed, Self::Error>;
+
+    // 可选：自定义包根检测
     fn detect_extracted_root(&self, extraction_root: &Path) -> Result<PathBuf, Self::Error>;
 }
 ```
 
-#### 3.2.3 平台枚举
+### 3.2 关键流程
+
+#### ensure_installed 完整流程
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     ensure_installed()                          │
+├─────────────────────────────────────────────────────────────────┤
+│ 1. 快速路径：尝试 resolve_cached()                               │
+│    └─> 缓存命中，直接返回                                        │
+│                                                                 │
+│ 2. 获取平台信息                                                  │
+│    └─> PackagePlatform::detect_current()                        │
+│                                                                 │
+│ 3. 计算安装目录                                                  │
+│    └─> package.install_dir(cache_root, platform)                │
+│                                                                 │
+│ 4. 再次检查缓存（双检锁模式）                                     │
+│    └─> 防止竞态条件                                              │
+│                                                                 │
+│ 5. 获取文件锁（fd-lock）                                         │
+│    └─> 创建 .lock 文件，轮询获取写锁                             │
+│    └─> 间隔 50ms (INSTALL_LOCK_POLL_INTERVAL)                   │
+│                                                                 │
+│ 6. 获取锁后再次检查缓存                                          │
+│    └─> 其他进程可能已完成安装                                    │
+│                                                                 │
+│ 7. 下载 Manifest                                                │
+│    └─> HTTP GET manifest_url()                                  │
+│    └─> 验证 release_version 匹配                                │
+│                                                                 │
+│ 8. 创建暂存目录                                                  │
+│    └─> <cache_root>/.staging/<temp>/                           │
+│                                                                 │
+│ 9. 获取平台特定归档信息                                          │
+│    └─> platform_archive(manifest, platform)                     │
+│                                                                 │
+│ 10. 下载归档文件                                                 │
+│     └─> HTTP GET archive_url()                                  │
+│                                                                 │
+│ 11. 验证归档                                                     │
+│     └─> verify_archive_size()（如果 manifest 提供 size_bytes）   │
+│     └─> verify_sha256()（强制）                                  │
+│                                                                 │
+│ 12. 写入并解压归档                                               │
+│     └─> 写入暂存目录                                             │
+│     └─> extract_archive() -> extraction_root/                   │
+│                                                                 │
+│ 13. 检测包根目录                                                 │
+│     └─> detect_extracted_root()                                 │
+│     └─> 查找 manifest.json 或单个子目录                          │
+│                                                                 │
+│ 14. 预验证（暂存区）                                             │
+│     └─> load_installed(extracted_root, platform)                │
+│     └─> 验证 installed_version 匹配                              │
+│                                                                 │
+│ 15. 隔离现有安装                                                 │
+│     └─> quarantine_existing_install()                           │
+│     └─> 重命名为 .<name>.replaced-<pid>-<suffix>                │
+│                                                                 │
+│ 16. 原子性晋升                                                   │
+│     └─> promote_staged_install()                                │
+│     └─> fs::rename(extracted_root, install_dir)                 │
+│                                                                 │
+│ 17. 最终验证（安装目录）                                          │
+│     └─> load_installed(install_dir, platform)                   │
+│                                                                 │
+│ 18. 清理                                                         │
+│     └─> 删除隔离的旧版本（如果存在）                              │
+│     └─> 删除暂存目录                                             │
+│                                                                 │
+│ [错误处理]                                                       │
+│ - 任何步骤失败：恢复隔离的旧版本                                  │
+│ - 晋升失败且检测到其他进程已安装：使用该版本                      │
+│ - 最终验证失败：删除损坏安装，恢复旧版本                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 3.3 归档解压实现
+
+#### ZIP 解压（src/archive.rs:110-152）
 
 ```rust
-pub enum PackagePlatform {
-    DarwinArm64,   // macOS Apple Silicon
-    DarwinX64,     // macOS Intel
-    LinuxArm64,    // Linux ARM64
-    LinuxX64,      // Linux x86_64
-    WindowsArm64,  // Windows ARM64
-    WindowsX64,    // Windows x86_64
+fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Result<(), PackageManagerError> {
+    // 1. 打开 ZIP 文件
+    // 2. 遍历每个 entry
+    // 3. 使用 enclosed_name() 检查路径遍历攻击
+    // 4. 创建目录或写入文件
+    // 5. Unix 系统：保留原始可执行权限（unix_mode）
 }
 ```
 
-### 3.3 错误处理
+**安全特性：**
+- 使用 `ZipFile::enclosed_name()` 确保 entry 不会逃逸解压根目录
+- Unix 系统保留原始文件权限（通过 `unix_mode()`）
+
+#### TAR.GZ 解压（src/archive.rs:178-246）
 
 ```rust
-pub enum PackageManagerError {
-    UnsupportedPlatform { os: String, arch: String },
-    InvalidBaseUrl(url::ParseError),
-    Http { context: String, source: reqwest::Error },
-    Io { context: String, source: std::io::Error },
-    MissingPlatform(String),
-    UnexpectedPackageVersion { expected: String, actual: String },
-    UnexpectedArchiveSize { expected: u64, actual: u64 },
-    ChecksumMismatch { expected: String, actual: String },
-    ArchiveExtraction(String),
-    MissingPackageRoot(PathBuf),
+fn extract_tar_gz_archive(archive_path: &Path, destination: &Path) -> Result<(), PackageManagerError> {
+    // 1. 使用 GzDecoder 解压 gzip 层
+    // 2. 遍历每个 entry
+    // 3. 拒绝：symlink、hard link、block/char device、FIFO、sparse files
+    // 4. 跳过：PAX extensions、GNU longname/longlink
+    // 5. 使用 safe_extract_path() 净化路径
+    // 6. 创建目录或使用 entry.unpack() 写入文件
+}
+```
+
+**安全特性：**
+- 显式拒绝危险 entry 类型（symlink、device files 等）
+- `safe_extract_path()` 过滤 `..`、`/`、Windows 前缀等
+
+### 3.4 并发控制
+
+使用 `fd-lock` crate 实现跨进程文件锁：
+
+```rust
+// src/manager.rs:82-109
+let lock_path = install_dir.with_extension("lock");
+let lock_file = OpenOptions::new()
+    .create(true)
+    .read(true)
+    .write(true)
+    .truncate(false)
+    .open(&lock_path)?;
+
+let mut install_lock = FileRwLock::new(lock_file);
+let _install_guard = loop {
+    match install_lock.try_write() {
+        Ok(guard) => break guard,
+        Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
+            sleep(INSTALL_LOCK_POLL_INTERVAL).await; // 50ms
+        }
+        Err(source) => return Err(...),
+    }
+};
+```
+
+### 3.5 原子性安装策略
+
+采用"隔离-晋升-清理"三阶段策略：
+
+```rust
+// 1. 隔离现有安装（如果存在）
+let replaced_install_dir = quarantine_existing_install(&install_dir).await?;
+// 将现有目录重命名为 .<name>.replaced-<pid>-<suffix>
+
+// 2. 原子性晋升
+let promotion = promote_staged_install(&extracted_root, &install_dir).await;
+// 使用 fs::rename() 原子移动
+
+// 3. 清理或恢复
+if promotion.is_err() {
+    restore_quarantined_install(&install_dir, replaced_install_dir.as_deref(), &error).await?;
+} else {
+    // 删除隔离的旧版本
+    if let Some(replaced) = replaced_install_dir {
+        let _ = fs::remove_dir_all(replaced).await;
+    }
 }
 ```
 
 ---
 
-## 4. 关键代码路径与文件引用
+## 四、关键代码路径与文件引用
 
 ### 4.1 文件结构
 
 ```
 codex-rs/package-manager/
-├── Cargo.toml           # crate 配置
-├── BUILD.bazel          # Bazel 构建配置
-├── README.md            # 文档
+├── Cargo.toml              # 包配置
+├── README.md               # 文档
+├── BUILD.bazel             # Bazel 构建配置
 └── src/
-    ├── lib.rs           # 公共 API 导出
-    ├── manager.rs       # PackageManager 核心实现（464 行）
-    ├── package.rs       # ManagedPackage trait 定义（69 行）
-    ├── config.rs        # PackageManagerConfig（40 行）
-    ├── archive.rs       # 归档解压和验证（270 行）
-    ├── platform.rs      # 平台检测（48 行）
-    ├── error.rs         # 错误类型定义（54 行）
-    └── tests.rs         # 单元测试和集成测试（700 行）
+    ├── lib.rs              # 模块导出
+    ├── manager.rs          # PackageManager 实现（464 行，核心）
+    ├── package.rs          # ManagedPackage trait（69 行）
+    ├── config.rs           # PackageManagerConfig（40 行）
+    ├── platform.rs         # PackagePlatform 枚举（48 行）
+    ├── archive.rs          # 归档处理（270 行）
+    ├── error.rs            # 错误类型（54 行）
+    └── tests.rs            # 单元测试（700 行）
 ```
 
-### 4.2 核心代码路径
+### 4.2 关键代码路径
 
-| 功能 | 文件 | 行号范围 |
-|------|------|----------|
-| 安装流程 | `manager.rs` | 55-298 |
-| 缓存解析 | `manager.rs` | 300-324 |
-| 隔离/提升/恢复 | `manager.rs` | 384-464 |
-| ZIP 解压 | `archive.rs` | 110-152 |
-| TAR.GZ 解压 | `archive.rs` | 178-247 |
-| 路径安全检查 | `archive.rs` | 249-270 |
-| SHA-256 验证 | `archive.rs` | 88-97 |
-| 大小验证 | `archive.rs` | 74-86 |
-| 包根检测 | `archive.rs` | 39-72 |
-| 平台检测 | `platform.rs` | 22-35 |
+| 功能 | 文件 | 行号 |
+|------|------|------|
+| `ensure_installed()` 主流程 | `src/manager.rs` | 55-298 |
+| `resolve_cached()` 缓存解析 | `src/manager.rs` | 45-52, 300-324 |
+| 文件锁获取 | `src/manager.rs` | 82-109 |
+| 隔离现有安装 | `src/manager.rs` | 384-427 |
+| 原子性晋升 | `src/manager.rs` | 429-443 |
+| 恢复隔离安装 | `src/manager.rs` | 445-464 |
+| ZIP 解压 | `src/archive.rs` | 110-152 |
+| TAR.GZ 解压 | `src/archive.rs` | 178-246 |
+| SHA-256 验证 | `src/archive.rs` | 88-97 |
+| 包根检测 | `src/archive.rs` | 39-72 |
+| 平台检测 | `src/platform.rs` | 22-35 |
 
 ### 4.3 测试覆盖
 
-| 测试 | 文件 | 说明 |
-|------|------|------|
-| `ensure_installed_downloads_and_extracts_zip_package` | `tests.rs:136` | 完整 ZIP 安装流程 |
-| `resolve_cached_uses_custom_cache_root` | `tests.rs:207` | 自定义缓存根目录 |
-| `ensure_installed_replaces_invalid_cached_install` | `tests.rs:245` | 替换无效缓存 |
-| `ensure_installed_rejects_manifest_version_mismatch` | `tests.rs:306` | 版本不匹配检测 |
-| `ensure_installed_serializes_concurrent_installs` | `tests.rs:351` | 并发安装序列化 |
-| `ensure_installed_rejects_unexpected_archive_size` | `tests.rs:415` | 大小验证失败 |
-| `staged_install_restore_keeps_previous_install_on_failed_promotion` | `tests.rs:469` | 提升失败回滚 |
-| `ensure_installed_restores_previous_install_when_final_validation_fails` | `tests.rs:500` | 最终验证失败回滚 |
-| `tar_gz_extraction_supports_default_package_root_detection` | `tests.rs:578` | TAR.GZ 包根检测 |
-| `tar_gz_extraction_rejects_symlinks` | `tests.rs:594` | 符号链接拒绝 |
-| `zip_extraction_rejects_parent_paths` | `tests.rs:609` | 路径逃逸防护 |
+`src/tests.rs` 包含 12+ 个测试用例，覆盖：
+
+| 测试 | 描述 |
+|------|------|
+| `ensure_installed_downloads_and_extracts_zip_package` | 完整 ZIP 安装流程 |
+| `resolve_cached_uses_custom_cache_root` | 自定义缓存根目录 |
+| `ensure_installed_replaces_invalid_cached_install` | 替换损坏缓存 |
+| `ensure_installed_rejects_manifest_version_mismatch` | 版本不匹配拒绝 |
+| `ensure_installed_serializes_concurrent_installs` | 并发安装串行化 |
+| `ensure_installed_rejects_unexpected_archive_size` | 文件大小验证 |
+| `staged_install_restore_keeps_previous_install_on_failed_promotion` | 晋升失败恢复 |
+| `ensure_installed_restores_previous_install_when_final_validation_fails` | 最终验证失败恢复 |
+| `tar_gz_extraction_supports_default_package_root_detection` | TAR.GZ 包根检测 |
+| `tar_gz_extraction_rejects_symlinks` | TAR.GZ 拒绝符号链接 |
+| `zip_extraction_rejects_parent_paths` | ZIP 路径遍历防护 |
 
 ---
 
-## 5. 依赖与外部交互
+## 五、依赖与外部交互
 
-### 5.1 外部依赖
+### 5.1 依赖 crate
 
-| Crate | 用途 |
+| crate | 用途 |
 |-------|------|
-| `fd-lock` | 跨进程文件锁（`RwLock`） |
-| `flate2` | Gzip 解压 |
-| `reqwest` | HTTP 客户端（清单和归档下载） |
+| `fd-lock` | 跨进程文件锁 |
+| `flate2` | gzip 解压 |
+| `reqwest` | HTTP 客户端（manifest 和归档下载） |
 | `serde` | 序列化/反序列化 |
-| `sha2` | SHA-256 校验和计算 |
-| `tar` | TAR 归档提取 |
-| `tempfile` | 临时目录创建 |
-| `thiserror` | 错误类型派生 |
-| `tokio` | 异步运行时（fs, sync, time） |
-| `url` | URL 解析和拼接 |
-| `zip` | ZIP 归档提取 |
+| `sha2` | SHA-256 校验 |
+| `tar` | TAR 归档处理 |
+| `tempfile` | 临时目录 |
+| `thiserror` | 错误类型定义 |
+| `tokio` | 异步运行时 |
+| `url` | URL 处理 |
+| `zip` | ZIP 归档处理 |
 
-### 5.2 调用方（下游 crate）
+### 5.2 调用方（消费者）
 
-| Crate | 路径 | 使用方式 |
-|-------|------|----------|
-| `codex-artifacts` | `codex-rs/artifacts/` | 主要调用方，实现 `ManagedPackage` trait 用于 Artifact Runtime 管理 |
-
-### 5.3 codex-artifacts 集成细节
-
-`codex-artifacts` 在 `runtime/manager.rs` 中实现了 `ManagedPackage` trait：
+#### codex-artifacts（主要消费者）
 
 ```rust
-// ArtifactRuntimePackage 实现 ManagedPackage
+// codex-rs/artifacts/src/runtime/manager.rs
+pub struct ArtifactRuntimeManager {
+    package_manager: PackageManager<ArtifactRuntimePackage>,
+    config: ArtifactRuntimeManagerConfig,
+}
+
+impl ArtifactRuntimeManager {
+    pub async fn ensure_installed(&self) -> Result<InstalledArtifactRuntime, ArtifactRuntimeError> {
+        self.package_manager.ensure_installed().await
+    }
+}
+
+// ArtifactRuntimePackage 实现 ManagedPackage trait
 impl ManagedPackage for ArtifactRuntimePackage {
     type Error = ArtifactRuntimeError;
     type Installed = InstalledArtifactRuntime;
     type ReleaseManifest = ReleaseManifest;
-
-    fn default_cache_root_relative(&self) -> &str {
-        "packages/artifacts"  // 默认缓存路径
-    }
-
-    fn version(&self) -> &str {
-        self.release.runtime_version()  // 从 release locator 获取版本
-    }
-
-    fn manifest_url(&self) -> Result<Url, PackageManagerError> {
-        self.release.manifest_url()  // 构建 GitHub release manifest URL
-    }
-
-    fn archive_url(&self, archive: &PackageReleaseArchive) -> Result<Url, PackageManagerError> {
-        // 构建 GitHub release 归档 URL
-        self.release.base_url()
-            .join(&format!("{}/{}", self.release.release_tag(), archive.archive))
-    }
-
-    // ... 其他方法
+    // ... 具体实现
 }
 ```
 
-### 5.4 版本常量
-
-`codex-rs/core/src/packages/versions.rs` 中定义了当前固定的 Artifact Runtime 版本：
-
+**Artifact Runtime 版本：** `codex-rs/core/src/packages/versions.rs`
 ```rust
 pub(crate) const ARTIFACT_RUNTIME: &str = "2.5.6";
 ```
 
+**默认发布位置：**
+- Base URL: `https://github.com/openai/codex/releases/download/`
+- Tag prefix: `artifact-runtime-v`
+- Manifest: `<tag>/<tag>-manifest.json`
+- 缓存目录: `~/.codex/packages/artifacts/<version>/<platform>/`
+
+### 5.3 外部交互
+
+| 交互方 | 方式 | 描述 |
+|--------|------|------|
+| GitHub Releases | HTTPS | 下载 manifest 和归档文件 |
+| 本地文件系统 | 文件 IO | 缓存、解压、安装 |
+| 其他进程 | 文件锁 | 通过 `.lock` 文件协调并发安装 |
+
 ---
 
-## 6. 风险、边界与改进建议
+## 六、风险、边界与改进建议
 
-### 6.1 已知风险
+### 6.1 潜在风险
 
-| 风险 | 说明 | 缓解措施 |
+| 风险 | 描述 | 缓解措施 |
 |------|------|----------|
-| **并发竞争** | 多进程同时安装同一版本可能导致竞争 | 使用 `fd-lock` 文件锁，轮询间隔 50ms |
-| **磁盘空间** | 临时解压和隔离目录可能占用双倍空间 | 使用 `tempfile` 自动清理，失败时清理隔离目录 |
-| **网络超时** | 大归档下载可能超时 | 依赖 `reqwest` 默认超时，调用方可配置自定义客户端 |
-| **权限问题** | 缓存目录可能无写入权限 | 错误通过 `PackageManagerError::Io` 暴露给调用方 |
-| **TOCTOU** | 检查-使用竞争（检查缓存后可能被修改） | `load_installed` 必须完整验证，不依赖缓存状态 |
+| **网络依赖** | 首次安装需要网络连接 | 缓存机制减少重复下载；支持自定义 cache_root |
+| **存储空间** | 多版本缓存占用磁盘空间 | 目前无自动清理机制，需手动管理 |
+| **权限问题** | 缓存目录可能无写入权限 | 清晰的错误信息；支持自定义 cache_root |
+| **竞态条件** | 多进程并发安装 | 文件锁 + 双检锁模式确保串行化 |
+| **恶意归档** | 路径遍历、符号链接攻击 | 严格的路径验证；拒绝危险 entry 类型 |
+| **版本漂移** | Manifest 版本与请求版本不匹配 | 强制版本验证，不匹配则报错 |
 
 ### 6.2 边界情况
 
-1. **版本回滚**：当新安装验证失败时，自动回滚到之前的隔离版本
-2. **部分下载**：网络中断会导致不完整归档，SHA-256 验证会捕获
-3. **损坏的缓存**：`load_installed` 失败被视为缓存未命中，触发重新下载
-4. **平台不支持**：明确返回 `UnsupportedPlatform` 错误
-5. **清单格式错误**：通过 `serde` 反序列化错误暴露
+| 场景 | 行为 |
+|------|------|
+| 缓存目录已存在但损坏 | `load_installed` 失败 → 视为缓存未命中 → 重新下载安装 |
+| 安装过程中进程崩溃 | 隔离目录残留（`.replaced-*`），下次安装会清理 |
+| 并发安装同一版本 | 文件锁确保串行化；后获取锁的进程会使用先完成的结果 |
+| 磁盘空间不足 | 在解压或晋升阶段报错，已隔离的旧版本会被恢复 |
+| 网络中断 | HTTP 错误会传播给调用方，暂存目录在 Drop 时自动清理 |
+| 不支持的平台 | `detect_current()` 返回 `UnsupportedPlatform` 错误 |
 
 ### 6.3 改进建议
 
-#### 6.3.1 功能增强
+#### 短期改进
 
-| 建议 | 优先级 | 说明 |
-|------|--------|------|
-| **下载进度回调** | 中 | 为大归档添加进度报告机制，当前是阻塞下载 |
-| **断点续传** | 低 | 支持 HTTP Range 请求，避免重新下载完整归档 |
-| **缓存清理** | 中 | 添加旧版本自动清理机制，当前无自动清理 |
-| **签名验证** | 低 | 除 SHA-256 外，支持 GPG 签名验证 |
-| **镜像回退** | 低 | 支持多镜像源，主源失败时自动切换 |
+1. **缓存清理机制**
+   - 添加 `cleanup_old_versions()` 方法，保留最近 N 个版本
+   - 或添加 `prune_cache()` 删除未使用的版本
 
-#### 6.3.2 代码质量
+2. **下载进度反馈**
+   - 当前 `download_bytes()` 是一次性下载大文件
+   - 可改为流式下载，支持进度回调
 
-| 建议 | 优先级 | 说明 |
-|------|--------|------|
-| **测试覆盖率** | 高 | 当前测试较全面，可添加更多边界情况（如磁盘满、权限拒绝） |
-| **文档示例** | 中 | 添加更多使用示例，特别是自定义 `ManagedPackage` 实现 |
-| **指标监控** | 低 | 添加安装时间、缓存命中率等指标（可选 feature） |
+3. **重试机制**
+   - 网络请求添加指数退避重试
+   - 特别是针对 GitHub Releases 的间歇性失败
 
-#### 6.3.3 架构优化
+#### 中期改进
 
-| 建议 | 优先级 | 说明 |
-|------|--------|------|
-| **流式解压** | 低 | 当前是先下载完整归档再解压，可考虑流式处理减少磁盘 I/O |
-| **内容寻址缓存** | 低 | 使用 SHA-256 作为缓存键，支持去重和验证 |
-| **并发下载** | 低 | 支持多部分并发下载加速大文件 |
+4. **增量更新/差分包**
+   - 对于大 runtime，支持差分包更新减少下载量
+   - 需要 manifest 格式扩展
 
-### 6.4 安全考虑
+5. **校验和缓存**
+   - 缓存已验证的归档校验和，避免重复计算
 
-1. **路径遍历**：当前实现已防护，但需持续审计 ZIP/TAR 库更新
-2. **供应链攻击**：依赖 `reqwest` 和 TLS，建议固定依赖版本
-3. **权限提升**：ZIP 权限保留仅在 Unix 生效，Windows 需额外处理
+6. **并发下载优化**
+   - 支持 range 请求，多线程分段下载大文件
+
+#### 架构建议
+
+7. **Manifest 签名验证**
+   - 添加对 manifest 的数字签名验证，防止中间人攻击
+
+8. **离线模式支持**
+   - 显式的离线模式，完全禁用网络请求
+   - 清晰的错误信息提示用户如何手动安装
+
+9. **指标和可观测性**
+   - 添加 tracing 日志，记录下载时间、缓存命中率等
+   - 支持 OpenTelemetry 指标导出
+
+### 6.4 代码质量评估
+
+| 维度 | 评分 | 说明 |
+|------|------|------|
+| 安全性 | ⭐⭐⭐⭐⭐ | 完善的路径验证、校验和、原子性安装 |
+| 可测试性 | ⭐⭐⭐⭐⭐ | 良好的抽象，测试覆盖率高（含并发测试） |
+| 文档 | ⭐⭐⭐⭐⭐ | README 详细，代码注释清晰 |
+| 错误处理 | ⭐⭐⭐⭐⭐ | 使用 thiserror，错误类型丰富 |
+| 性能 | ⭐⭐⭐⭐ | 缓存有效，但大文件下载可优化 |
+| 扩展性 | ⭐⭐⭐⭐⭐ | ManagedPackage trait 设计良好 |
 
 ---
 
-## 7. 总结
+## 七、总结
 
-`codex-package-manager` 是一个设计精良、职责清晰的包管理 crate，具有以下特点：
+`codex-package-manager` 是一个设计精良、安全可靠的通用包管理器。它通过 `ManagedPackage` trait 提供了良好的扩展性，使 `codex-artifacts` 能够专注于 artifact runtime 的特定逻辑，而无需关心下载、验证、解压等通用流程。
 
-1. **通用性**：通过 `ManagedPackage` trait 支持任意包类型
-2. **安全性**：多层防护（路径检查、校验验证、权限控制）
-3. **可靠性**：两阶段升级、自动回滚、并发控制
-4. **可测试性**：700 行测试代码覆盖主要场景
+其核心优势在于：
+1. **安全性优先**：多层防护防止路径遍历和恶意归档
+2. **并发安全**：文件锁确保多进程安全
+3. **原子性安装**：隔离-晋升-清理策略确保安装可靠性
+4. **良好的错误处理**：详细的错误上下文便于调试
 
-作为 `codex-artifacts` 的基础依赖，它为 Codex 的 Artifact 构建功能提供了稳定可靠的运行时管理能力。
+主要使用场景是通过 `ArtifactRuntimeManager` 安装 artifact runtime，支持 Codex CLI 的 artifact 生成功能。
+
+---
+
+*研究日期：2026-03-21*
+*研究范围：codex-rs/package-manager 目录及其调用方 codex-artifacts*
