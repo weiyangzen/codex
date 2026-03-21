@@ -1,426 +1,639 @@
 # codex-rs/network-proxy 深度研究文档
 
-## 目录
-- [场景与职责](#场景与职责)
-- [功能点目的](#功能点目的)
-- [具体技术实现](#具体技术实现)
-- [关键代码路径与文件引用](#关键代码路径与文件引用)
-- [依赖与外部交互](#依赖与外部交互)
-- [风险、边界与改进建议](#风险边界与改进建议)
+## 1. 场景与职责
+
+`codex-network-proxy` 是 Codex 的本地网络策略执行代理，作为 Codex 生态系统的网络沙箱核心组件。其主要职责包括：
+
+### 1.1 核心定位
+- **网络访问控制网关**：所有 Codex 子进程的网络流量必须通过此代理
+- **策略执行点**：强制执行允许/拒绝列表、Limited/Full 模式、本地网络保护等安全策略
+- **审计与可观测性**：记录所有网络策略决策，支持 OTEL 格式的事件导出
+
+### 1.2 运行模式
+- **Managed by Codex**（默认）：代理由 Codex 管理，自动绑定到回环 ephemeral 端口
+- **Standalone**：独立运行，可配置自定义监听地址
+
+### 1.3 关键场景
+1. **沙箱网络隔离**：配合 Seatbelt/Landlock 等沙箱机制，提供网络层隔离
+2. **企业合规**：通过 managed config 限制用户可访问的域名范围
+3. **安全审计**：完整记录被阻止的请求，支持合规审计
+4. **本地开发保护**：防止 AI 助手意外访问本地服务（如 docker.sock、metadata endpoints）
 
 ---
 
-## 场景与职责
+## 2. 功能点目的
 
-`codex-network-proxy` 是 Codex 的本地网络策略执行代理，作为网络沙箱的核心组件，负责：
+### 2.1 双协议代理服务
 
-1. **网络流量代理**：同时运行 HTTP 代理（默认 127.0.0.1:3128）和 SOCKS5 代理（默认 127.0.0.1:8081）
-2. **策略强制执行**：基于允许/拒绝列表（allowlist/denylist）和模式（full/limited）控制网络访问
-3. **安全防护**：防止本地/私有网络未授权访问、DNS 重绑定攻击、SSRF 攻击
-4. **MITM 支持**：在 limited 模式下通过 TLS 终止实现 HTTPS 流量内容检查
-5. **Unix Socket 代理**：macOS 平台支持通过 HTTP 代理访问本地 Unix Socket
+| 协议 | 默认地址 | 用途 |
+|------|----------|------|
+| HTTP Proxy | 127.0.0.1:3128 | HTTP/HTTPS 流量代理，支持 CONNECT 隧道 |
+| SOCKS5 Proxy | 127.0.0.1:8081 | TCP/UDP 流量代理，支持更广泛的协议 |
 
-### 核心使用场景
-
-| 场景 | 说明 |
-|------|------|
-| 沙箱网络隔离 | 子进程通过代理访问网络，主进程控制策略 |
-| 只读网络模式 | Limited 模式仅允许 GET/HEAD/OPTIONS 方法 |
-| 本地服务访问 | 通过 x-unix-socket header 访问 Docker 等本地服务 |
-| 策略动态更新 | 运行时添加允许/拒绝域名，无需重启代理 |
-
----
-
-## 功能点目的
-
-### 1. 双协议代理服务
-
-- **HTTP 代理**：处理 HTTP/HTTPS 请求，支持 CONNECT 隧道
-- **SOCKS5 代理**：处理 TCP/UDP 流量，支持 UDP 关联（需显式启用）
-
-### 2. 网络模式控制
-
-| 模式 | 描述 |
-|------|------|
-| `full` | 允许所有 HTTP 方法，HTTPS CONNECT 直接隧道 |
-| `limited` | 仅允许 GET/HEAD/OPTIONS，HTTPS 需 MITM 才能检查内容 |
-
-### 3. 域名策略系统
-
-- **允许列表（allowed_domains）**：精确匹配或通配符（`*.example.com`, `**.example.com`）
-- **拒绝列表（denied_domains）**：优先级高于允许列表
-- **本地绑定控制**：`allow_local_binding` 控制是否允许访问本地/私有 IP
-
-### 4. MITM（中间人）功能
-
-- 自动生成 CA 证书和 per-host 叶子证书
-- 在 limited 模式下终止 HTTPS 以检查请求方法
-- 证书存储于 `$CODEX_HOME/proxy/`（ca.pem + ca.key）
-
-### 5. Unix Socket 代理（macOS 限定）
-
-- 通过 `x-unix-socket: /path/to/socket` header 路由请求
-- 支持显式白名单或 `dangerously_allow_all_unix_sockets` 模式
-
----
-
-## 具体技术实现
-
-### 3.1 核心数据结构
+### 2.2 网络模式（NetworkMode）
 
 ```rust
-// 配置结构（config.rs）
+pub enum NetworkMode {
+    Limited,  // 只读模式：仅允许 GET/HEAD/OPTIONS
+    Full,     // 完整模式：允许所有 HTTP 方法
+}
+```
+
+**Limited 模式的关键限制**：
+- HTTP 请求只允许 GET/HEAD/OPTIONS
+- HTTPS CONNECT 需要 MITM 支持才能执行方法检查
+- SOCKS5 完全禁用（因为无法检查内部流量）
+
+### 2.3 域名策略
+
+**允许列表（Allowlist）**：
+- 支持精确匹配：`example.com`
+- 支持子域名通配：`*.example.com`（不匹配 apex）
+- 支持 apex+子域通配：`**.example.com`（匹配 apex 和所有子域）
+- **拒绝全局通配符 `*`**（安全设计）
+
+**拒绝列表（Denylist）**：
+- 优先级高于允许列表
+- 支持相同的通配符语法
+
+### 2.4 本地网络保护
+
+当 `allow_local_binding = false` 时：
+- 阻止所有本地/私有 IP 范围（127.0.0.0/8, 10.0.0.0/8, 192.168.0.0/16 等）
+- 即使域名在允许列表中，如果解析到本地 IP，也会被阻止（DNS 重绑定防护）
+- 需要显式将 `localhost` 或具体 IP 加入允许列表才能访问
+
+### 2.5 MITM（中间人）支持
+
+**目的**：在 Limited 模式下检查 HTTPS 流量中的 HTTP 方法
+
+**实现**：
+- 自动生成/加载本地 CA（存储在 `$CODEX_HOME/proxy/ca.pem` + `ca.key`）
+- 为每个目标主机签发临时叶子证书
+- 终止 TLS 连接，检查内部 HTTP 请求，然后重新加密转发
+
+**安全考虑**：
+- CA 私钥文件权限严格限制为 0o600
+- 拒绝使用符号链接的 CA 密钥
+- 原子写入防止部分文件残留
+
+### 2.6 Unix Socket 代理（macOS 专用）
+
+**用途**：允许代理到本地 Unix Socket（如 Docker socket）
+
+**安全控制**：
+- 仅 macOS 支持
+- 必须通过 `allow_unix_sockets` 显式允许特定路径
+- 或设置 `dangerously_allow_all_unix_sockets`（危险选项）
+- 启用后强制代理监听回环地址（防止远程桥接攻击）
+
+### 2.7 上游代理支持
+
+当 `allow_upstream_proxy = true` 时：
+- 尊重 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 环境变量
+- 支持通过企业代理出站
+- CONNECT 隧道可级联到上游代理
+
+---
+
+## 3. 具体技术实现
+
+### 3.1 架构概览
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     NetworkProxy (主入口)                     │
+│  ┌─────────────────┐  ┌─────────────────┐                   │
+│  │  HTTP Proxy     │  │  SOCKS5 Proxy   │                   │
+│  │  (http_proxy)   │  │  (socks5)       │                   │
+│  └────────┬────────┘  └────────┬────────┘                   │
+│           │                    │                            │
+│           └────────┬───────────┘                            │
+│                    ▼                                        │
+│         ┌─────────────────────┐                             │
+│         │  NetworkProxyState  │                             │
+│         │  - 配置管理          │                             │
+│         │  - 策略评估          │                             │
+│         │  - 审计日志          │                             │
+│         └─────────────────────┘                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3.2 关键数据结构
+
+#### 3.2.1 NetworkProxyConfig
+
+```rust
 pub struct NetworkProxyConfig {
     pub network: NetworkProxySettings,
 }
 
 pub struct NetworkProxySettings {
     pub enabled: bool,                           // 总开关
-    pub mode: NetworkMode,                       // full/limited
-    pub allowed_domains: Vec<String>,           // 允许域名列表
-    pub denied_domains: Vec<String>,            // 拒绝域名列表
-    pub allow_local_binding: bool,              // 允许本地/私有 IP
-    pub allow_unix_sockets: Vec<String>,        // 允许的 Unix Socket 路径
-    pub mitm: bool,                             // 启用 MITM
-    pub allow_upstream_proxy: bool,             // 尊重上游代理环境变量
+    pub proxy_url: String,                       // HTTP 代理监听地址
+    pub enable_socks5: bool,                     // 是否启用 SOCKS5
+    pub socks_url: String,                       // SOCKS5 监听地址
+    pub enable_socks5_udp: bool,                 // SOCKS5 UDP 中继
+    pub allow_upstream_proxy: bool,              // 尊重上游代理环境变量
     pub dangerously_allow_non_loopback_proxy: bool,  // 允许非回环绑定
-    pub dangerously_allow_all_unix_sockets: bool,    // 允许所有 Unix Socket
+    pub dangerously_allow_all_unix_sockets: bool,    // 允许所有 Unix socket
+    pub mode: NetworkMode,                       // Limited/Full
+    pub allowed_domains: Vec<String>,            // 允许列表
+    pub denied_domains: Vec<String>,             // 拒绝列表
+    pub allow_unix_sockets: Vec<String>,         // 允许的 Unix socket 路径
+    pub allow_local_binding: bool,               // 允许本地/私有网络
+    pub mitm: bool,                              // 启用 MITM
 }
+```
 
-// 运行时状态（runtime.rs）
+#### 3.2.2 NetworkProxyState
+
+```rust
 pub struct NetworkProxyState {
-    state: Arc<RwLock<ConfigState>>,
-    reloader: Arc<dyn ConfigReloader>,
+    state: Arc<RwLock<ConfigState>>,           // 配置状态（支持热重载）
+    reloader: Arc<dyn ConfigReloader>,         // 配置重载器
     blocked_request_observer: Arc<RwLock<Option<Arc<dyn BlockedRequestObserver>>>>,
-    audit_metadata: NetworkProxyAuditMetadata,
+    audit_metadata: NetworkProxyAuditMetadata, // 审计元数据
 }
 
 pub struct ConfigState {
     pub config: NetworkProxyConfig,
-    pub allow_set: GlobSet,          // 编译后的允许规则
-    pub deny_set: GlobSet,           // 编译后的拒绝规则
+    pub allow_set: GlobSet,      // 编译后的允许列表（globset）
+    pub deny_set: GlobSet,       // 编译后的拒绝列表
     pub mitm: Option<Arc<MitmState>>,
-    pub constraints: NetworkProxyConstraints,
-    pub blocked: VecDeque<BlockedRequest>,  // 阻塞请求历史
+    pub constraints: NetworkProxyConstraints,  // 托管约束
+    pub blocked: VecDeque<BlockedRequest>,     // 被阻止请求缓冲区
     pub blocked_total: u64,
 }
 ```
 
-### 3.2 策略决策流程
-
-```
-请求到达
-    ↓
-检查 enabled → 否 → 返回 proxy_disabled
-    ↓
-检查 mode guard → limited 模式拒绝非安全方法
-    ↓
-检查 deny_set → 匹配 → 返回 denied
-    ↓
-检查 allow_local_binding → 否 → 检查本地/私有 IP
-    ↓
-检查 allow_set → 不匹配 → 调用 policy_decider（如有）
-    ↓
-返回 Allow / Deny / Ask
-```
-
-关键代码（network_policy.rs:289-359）：
+#### 3.2.3 策略决策类型
 
 ```rust
-pub(crate) async fn evaluate_host_policy(
-    state: &NetworkProxyState,
-    decider: Option<&Arc<dyn NetworkPolicyDecider>>,
-    request: &NetworkPolicyRequest,
-) -> Result<NetworkDecision> {
-    let host_decision = state.host_blocked(&request.host, request.port).await?;
-    let (decision, policy_override) = match host_decision {
-        HostBlockDecision::Allowed => (NetworkDecision::Allow, false),
-        HostBlockDecision::Blocked(HostBlockReason::NotAllowed) => {
-            // 尝试通过 policy_decider 覆盖
-            if let Some(decider) = decider {
-                let decider_decision = map_decider_decision(decider.decide(request.clone()).await);
-                let policy_override = matches!(decider_decision, NetworkDecision::Allow);
-                (decider_decision, policy_override)
-            } else {
-                (NetworkDecision::deny_with_source(...), false)
+pub enum NetworkDecision {
+    Allow,
+    Deny {
+        reason: String,
+        source: NetworkDecisionSource,
+        decision: NetworkPolicyDecision,  // Deny / Ask
+    },
+}
+
+pub enum NetworkDecisionSource {
+    BaselinePolicy,   // 基础策略（允许/拒绝列表）
+    ModeGuard,        // 模式守卫（Limited 模式限制）
+    ProxyState,       // 代理状态（如 disabled）
+    Decider,          // 自定义策略决策器
+}
+```
+
+### 3.3 关键流程
+
+#### 3.3.1 HTTP 请求处理流程（http_proxy.rs）
+
+```
+1. 接收 HTTP 请求
+   ├── 检查 proxy enabled 状态
+   ├── 提取目标 host 和 port
+   └── 验证 Host 头与目标一致（防止请求走私）
+
+2. 策略评估
+   ├── 检查允许/拒绝列表（evaluate_host_policy）
+   │   ├── 拒绝列表匹配 → 阻止
+   │   ├── 本地 IP 检查 → 如未允许则阻止
+   │   └── 允许列表匹配 → 通过
+   └── 如未在允许列表中 → 调用 PolicyDecider（如有）
+
+3. 方法检查
+   └── Limited 模式下只允许 GET/HEAD/OPTIONS
+
+4. 特殊处理
+   ├── x-unix-socket 头 → Unix Socket 代理（macOS）
+   └── CONNECT 方法 → 建立隧道或 MITM
+
+5. 转发请求
+   └── 通过 UpstreamClient 发送到目标
+```
+
+#### 3.3.2 HTTPS CONNECT 处理流程
+
+```
+1. 接收 CONNECT 请求
+
+2. 策略评估（同 HTTP）
+
+3. Limited 模式检查
+   ├── MITM 启用 → 进入 MITM 流程
+   └── MITM 禁用 → 阻止（需要 MITM 才能检查内部方法）
+
+4. Full 模式
+   └── 建立直通隧道（可选级联到上游代理）
+```
+
+#### 3.3.3 MITM 流程（mitm.rs）
+
+```
+1. 接收已升级的 CONNECT 连接
+
+2. 加载/生成目标主机的叶子证书
+   └── 使用 ManagedMitmCa 签发证书
+
+3. 终止 TLS，解密内部 HTTP 请求
+
+4. 策略检查
+   ├── 重新检查本地/私有 IP（DNS 重绑定防护）
+   └── 检查 HTTP 方法（Limited 模式）
+
+5. 转发到上游
+   └── 重新加密发送到目标服务器
+```
+
+#### 3.3.4 SOCKS5 处理流程（socks5.rs）
+
+```
+1. 接收 SOCKS5 连接
+
+2. 检查 enabled 状态
+
+3. Limited 模式检查
+   └── Limited 模式下完全阻止 SOCKS5
+
+4. 策略评估
+   └── 同 HTTP 流程（evaluate_host_policy）
+
+5. 建立 TCP 连接或 UDP 中继
+```
+
+### 3.4 策略评估实现（policy.rs + runtime.rs）
+
+```rust
+// 主机阻止决策
+pub async fn host_blocked(&self, host: &str, port: u16) -> Result<HostBlockDecision> {
+    // 1. 拒绝列表检查（最高优先级）
+    if deny_set.is_match(host) {
+        return Ok(HostBlockDecision::Blocked(HostBlockReason::Denied));
+    }
+
+    // 2. 本地/私有网络检查
+    if !allow_local_binding {
+        // 检查是否为本地 IP 字面量
+        if is_loopback_host(&host) || is_non_public_ip(ip) {
+            if !is_explicit_local_allowlisted(&allowed_domains, &host) {
+                return Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowedLocal));
             }
         }
-        HostBlockDecision::Blocked(reason) => (...)
-    };
-    // 发送审计事件
-    emit_policy_audit_event(state, ...);
-    Ok(decision)
-}
-```
-
-### 3.3 HTTP 代理实现
-
-基于 Rama 框架的 HTTP/1 服务（http_proxy.rs）：
-
-```rust
-async fn run_http_proxy_with_listener(...) -> Result<()> {
-    let http_service = HttpServer::http1().service(
-        (
-            UpgradeLayer::new(  // 处理 CONNECT 方法
-                MethodMatcher::CONNECT,
-                service_fn(http_connect_accept),   // 接受/拒绝 CONNECT
-                service_fn(http_connect_proxy),    // 建立隧道
-            ),
-            RemoveResponseHeaderLayer::hop_by_hop(),
-        )
-            .into_layer(service_fn(http_plain_proxy)),  // 普通 HTTP 代理
-    );
-    listener.serve(AddInputExtensionLayer::new(state).into_layer(http_service)).await;
-}
-```
-
-**CONNECT 处理流程**：
-1. `http_connect_accept`：验证策略、检查 MITM 需求
-2. `http_connect_proxy`：建立隧道或启动 MITM
-3. `forward_connect_tunnel`：使用 TcpConnector + TlsConnectorLayer 转发
-
-**普通 HTTP 处理**：
-1. 检查 `x-unix-socket` header → 路由到 Unix Socket
-2. 验证 Host 策略
-3. 检查方法限制
-4. 转发到上游（直接或通过上游代理）
-
-### 3.4 SOCKS5 代理实现
-
-基于 `rama-socks5`（socks5.rs）：
-
-```rust
-async fn run_socks5_with_listener(...) -> Result<()> {
-    let tcp_connector = TcpConnector::default();
-    let policy_tcp_connector = service_fn(move |req: TcpRequest| {
-        handle_socks5_tcp(req, tcp_connector, policy_decider)
-    });
-    
-    let socks_connector = DefaultConnector::default().with_connector(policy_tcp_connector);
-    let base = Socks5Acceptor::new().with_connector(socks_connector);
-    
-    if enable_socks5_udp {
-        let udp_relay = DefaultUdpRelay::default().with_async_inspector(...);
-        let socks_acceptor = base.with_udp_associator(udp_relay);
-        listener.serve(...).await;
+        // DNS 解析检查（防止 DNS 重绑定）
+        if host_resolves_to_non_public_ip(host, port).await {
+            return Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowedLocal));
+        }
     }
-}
-```
 
-### 3.5 MITM 实现
-
-证书管理（certs.rs）：
-
-```rust
-pub(super) struct ManagedMitmCa {
-    issuer: Issuer<'static, KeyPair>,  // CA 签发者
-}
-
-impl ManagedMitmCa {
-    pub(super) fn load_or_create() -> Result<Self> {
-        // 从 $CODEX_HOME/proxy/ 加载或生成 CA
-        // 使用 rcgen 生成 ECDSA P-256 证书
+    // 3. 允许列表检查
+    if allowed_domains_empty || !allow_set.is_match(host) {
+        return Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowed));
     }
-    
-    pub(super) fn tls_acceptor_data_for_host(&self, host: &str) -> Result<TlsAcceptorData> {
-        // 为特定 host 签发叶子证书
-        // 使用 rustls 构建 ServerConfig
-    }
+
+    Ok(HostBlockDecision::Allowed)
 }
 ```
 
-MITM 隧道（mitm.rs:117-181）：
+### 3.5 审计事件格式
 
 ```rust
-pub(crate) async fn mitm_tunnel(upgraded: Upgraded) -> Result<()> {
-    let acceptor_data = mitm.tls_acceptor_data_for_host(&target_host)?;
-    
-    let https_service = TlsAcceptorLayer::new(acceptor_data)
-        .into_layer(http_service);
-    
-    https_service.serve(upgraded).await
-}
+// OTEL 兼容的事件结构
+tracing::event!(
+    target: "codex_otel.network_proxy",
+    event.name = "codex.network_proxy.policy_decision",
+    event.timestamp = %audit_timestamp(),
+    conversation.id = metadata.conversation_id,
+    app.version = metadata.app_version,
+    network.policy.scope = "domain",  // 或 "non_domain"
+    network.policy.decision = "allow" | "deny" | "ask",
+    network.policy.source = "baseline_policy" | "mode_guard" | "proxy_state" | "decider",
+    network.policy.reason = reason,
+    network.transport.protocol = "http" | "https_connect" | "socks5_tcp" | "socks5_udp",
+    server.address = host,
+    server.port = port,
+    http.request.method = method,
+    client.address = client_addr,
+    network.policy.override = policy_override,
+);
 ```
 
-### 3.6 约束验证系统
+### 3.6 环境变量注入
 
-用于管理配置限制（state.rs:86-365）：
-
-```rust
-pub fn validate_policy_against_constraints(
-    config: &NetworkProxyConfig,
-    constraints: &NetworkProxyConstraints,
-) -> Result<(), NetworkProxyConstraintError> {
-    // 验证 enabled、mode、allow_upstream_proxy 等字段
-    // 验证 allowed_domains 是否为约束的子集
-    // 验证 denied_domains 是否包含所有必需的条目
-}
-```
-
-### 3.7 审计日志
-
-OTEL 兼容的事件格式（network_policy.rs:228-255）：
+代理启动后会向子进程注入以下环境变量：
 
 ```rust
-fn emit_policy_audit_event(state: &NetworkProxyState, args: PolicyAuditEventArgs<'_>) {
-    tracing::event!(
-        target: "codex_otel.network_proxy",
-        event.name = "codex.network_proxy.policy_decision",
-        network.policy.scope = args.scope,           // domain/non_domain
-        network.policy.decision = args.decision,     // allow/deny/ask
-        network.policy.source = args.source,         // baseline_policy/mode_guard/proxy_state/decider
-        network.policy.reason = args.reason,
-        network.transport.protocol = args.protocol.as_policy_protocol(),
-        server.address = args.server_address,
-        server.port = args.server_port,
-        http.request.method = args.method.unwrap_or("none"),
-        client.address = args.client_addr.unwrap_or("unknown"),
-        network.policy.override = args.policy_override,
-        // ... 元数据字段
-    );
-}
+// HTTP 代理变量
+HTTP_PROXY=http://127.0.0.1:3128
+HTTPS_PROXY=http://127.0.0.1:3128
+WS_PROXY=http://127.0.0.1:3128
+WSS_PROXY=http://127.0.0.1:3128
+
+// SOCKS5 代理变量（当启用时）
+ALL_PROXY=socks5h://127.0.0.1:8081
+FTP_PROXY=socks5h://127.0.0.1:8081
+
+// 不代理列表（防止代理循环）
+NO_PROXY=localhost,127.0.0.1,::1,*.local,.local,169.254.0.0/16,...
+
+// 本地绑定权限标记
+CODEX_NETWORK_ALLOW_LOCAL_BINDING=0|1
+
+// macOS SSH 代理命令
+GIT_SSH_COMMAND=ssh -o ProxyCommand='nc -X 5 -x 127.0.0.1:8081 %h %p'
 ```
 
 ---
 
-## 关键代码路径与文件引用
+## 4. 关键代码路径与文件引用
 
-### 核心模块文件
+### 4.1 模块结构
 
-| 文件 | 职责 |
-|------|------|
-| `src/lib.rs` | 模块导出、公共 API |
-| `src/proxy.rs` | NetworkProxy/Builder/Handle，环境变量注入 |
-| `src/config.rs` | 配置解析、地址解析、绑定限制 |
-| `src/runtime.rs` | NetworkProxyState、配置重载、阻塞请求记录 |
-| `src/state.rs` | ConfigState、约束验证、构建逻辑 |
-| `src/policy.rs` | Host 解析、GlobSet 编译、域名模式匹配 |
-| `src/network_policy.rs` | 策略决策 trait、审计事件、评估逻辑 |
-| `src/http_proxy.rs` | HTTP/HTTPS 代理服务实现 |
-| `src/socks5.rs` | SOCKS5 代理服务实现 |
-| `src/mitm.rs` | HTTPS MITM 隧道实现 |
-| `src/certs.rs` | CA 和叶子证书管理 |
-| `src/responses.rs` | 阻塞响应生成、错误消息 |
-| `src/reasons.rs` | 阻塞原因常量 |
+```
+codex-rs/network-proxy/src/
+├── lib.rs              # 模块导出，公共 API
+├── proxy.rs            # NetworkProxy 主结构，Builder 模式
+├── config.rs           # 配置解析，地址解析，绑定限制
+├── state.rs            # 配置状态，约束验证
+├── runtime.rs          # NetworkProxyState，策略评估，审计
+├── policy.rs           # 域名匹配，GlobSet 编译，IP 分类
+├── network_policy.rs   # 策略决策 trait，审计事件发射
+├── http_proxy.rs       # HTTP 代理服务实现
+├── socks5.rs           # SOCKS5 代理服务实现
+├── mitm.rs             # MITM TLS 终止实现
+├── certs.rs            # CA 证书管理，叶子证书签发
+├── upstream.rs         # 上游连接，Unix Socket 连接器
+├── responses.rs        # HTTP 响应构造，错误消息
+└── reasons.rs          # 阻止原因常量
+```
 
-### 关键流程代码路径
+### 4.2 关键代码路径
 
-1. **代理启动**：`proxy.rs:127-191` (builder) → `proxy.rs:428-494` (run)
-2. **HTTP 请求处理**：`http_proxy.rs:423-747` (http_plain_proxy)
-3. **CONNECT 处理**：`http_proxy.rs:152-315` (http_connect_accept) → `http_proxy.rs:317-376` (http_connect_proxy)
-4. **策略评估**：`network_policy.rs:289-359` (evaluate_host_policy)
-5. **主机阻塞检查**：`runtime.rs:337-402` (host_blocked)
-6. **SOCKS5 TCP 处理**：`socks5.rs:132-294` (handle_socks5_tcp)
-7. **MITM 隧道**：`mitm.rs:117-181` (mitm_tunnel)
+| 功能 | 文件 | 关键函数/结构 |
+|------|------|--------------|
+| 代理启动 | `proxy.rs` | `NetworkProxy::builder().build().await`, `NetworkProxy::run()` |
+| HTTP 请求处理 | `http_proxy.rs` | `http_plain_proxy()`, `http_connect_accept()` |
+| SOCKS5 处理 | `socks5.rs` | `handle_socks5_tcp()`, `inspect_socks5_udp()` |
+| 策略评估 | `runtime.rs` | `NetworkProxyState::host_blocked()` |
+| 域名匹配 | `policy.rs` | `compile_globset()`, `DomainPattern` |
+| MITM 处理 | `mitm.rs` | `mitm_tunnel()`, `mitm_blocking_response()` |
+| 证书管理 | `certs.rs` | `ManagedMitmCa::load_or_create()` |
+| 审计事件 | `network_policy.rs` | `evaluate_host_policy()`, `emit_policy_audit_event()` |
+| 配置热重载 | `runtime.rs` | `NetworkProxyState::reload_if_needed()` |
+| 约束验证 | `state.rs` | `validate_policy_against_constraints()` |
 
-### 测试文件
+### 4.3 外部调用接口
 
-| 文件 | 覆盖内容 |
-|------|----------|
-| `src/mitm_tests.rs` | MITM 策略拦截测试 |
-| `src/proxy.rs:563-819` | 代理构建器单元测试 |
-| `src/config.rs:354-605` | 配置解析单元测试 |
-| `src/policy.rs:312-435` | 域名匹配单元测试 |
-| `src/network_policy.rs:531-890` | 策略决策单元测试 |
-| `src/runtime.rs:785-1000+` | 运行时状态单元测试 |
-| `src/socks5.rs:484-609` | SOCKS5 单元测试 |
+**被 core 模块调用**（`core/src/network_proxy_loader.rs`）：
+```rust
+pub async fn build_network_proxy_state() -> Result<NetworkProxyState>
+```
 
----
-
-## 依赖与外部交互
-
-### 外部依赖（Cargo.toml）
-
-| 依赖 | 用途 |
-|------|------|
-| `rama-*` (0.3.0-alpha.4) | HTTP/SOCKS5 代理框架 |
-| `globset` | 域名通配符匹配 |
-| `tokio` | 异步运行时 |
-| `serde` | 配置序列化 |
-| `chrono`/`time` | 时间戳处理 |
-| `codex-utils-*` | 内部工具（路径、home 目录、rustls） |
-
-### 调用方（上游依赖）
-
-| Crate | 使用方式 |
-|-------|----------|
-| `codex-core` | `network_proxy_loader.rs` 构建代理状态，`network_policy_decision.rs` 处理策略决策 |
-| `codex-tui` | 通过 core 使用网络代理 |
-| `codex-cli` | 命令行启动时代理配置 |
-
-### 核心集成点
-
-**codex-core/src/network_proxy_loader.rs**：
-- 构建 `NetworkProxyState` 和 `MtimeConfigReloader`
-- 从配置层加载网络设置
-- 应用 execpolicy 网络规则
-
-**codex-core/src/network_policy_decision.rs**：
-- 转换 `NetworkPolicyDecisionPayload`
-- 生成 `NetworkApprovalContext`
-- 处理阻塞请求消息
+**被 core 模块调用**（`core/src/config/network_proxy_spec.rs`）：
+```rust
+NetworkProxySpec::start_proxy(...)
+NetworkProxy::builder()
+    .state(Arc::new(state))
+    .policy_decider(decider)
+    .blocked_request_observer(observer)
+    .build()
+    .await
+```
 
 ---
 
-## 风险、边界与改进建议
+## 5. 依赖与外部交互
 
-### 已知风险
+### 5.1 外部依赖（Cargo.toml）
 
-1. **DNS 重绑定攻击**
-   - 缓解：运行时 DNS 解析检查（`host_resolves_to_non_public_ip`）
-   - 限制：2 秒超时，失败时默认允许
-   - 建议：在生产环境结合防火墙/VPC 策略
+**核心依赖**：
+- `rama-*` (0.3.0-alpha.4): 代理服务器框架
+  - `rama-core`: 核心服务抽象
+  - `rama-http`: HTTP 协议处理
+  - `rama-http-backend`: HTTP 服务器/客户端后端
+  - `rama-net`: 网络地址、代理协议
+  - `rama-socks5`: SOCKS5 协议实现
+  - `rama-tcp`: TCP 连接器
+  - `rama-tls-rustls`: TLS 支持（rustls 后端）
+  - `rama-unix`: Unix Socket 支持（macOS）
+- `globset`: 域名通配符匹配
+- `rustls` (via rama): TLS 加密
+- `rcgen` (via rama): 证书生成
 
-2. **MITM CA 安全**
-   - 缓解：私钥文件权限 0o600，拒绝符号链接
-   - 风险：CA 私钥泄露可导致中间人攻击
-   - 建议：定期轮换 CA，使用硬件安全模块
+**工具依赖**：
+- `tokio`: 异步运行时
+- `serde`/`serde_json`: 配置序列化
+- `anyhow`: 错误处理
+- `thiserror`: 自定义错误类型
+- `tracing`: 日志和审计
+- `chrono`/`time`: 时间处理
+- `async-trait`: 异步 trait
+- `clap`: CLI 参数（仅 binary）
 
-3. **Unix Socket 代理风险**
-   - 缓解：macOS 限定、绝对路径要求、白名单机制
-   - 风险：`dangerously_allow_all_unix_sockets` 可访问任意 socket
-   - 建议：避免在生产环境启用 `dangerously_*` 选项
+**内部依赖**：
+- `codex-utils-absolute-path`: 绝对路径处理
+- `codex-utils-home-dir`: Codex home 目录解析
+- `codex-utils-rustls-provider`: rustls 加密提供者初始化
 
-4. **Limited 模式绕过**
-   - 缓解：无 MITM 时拒绝 HTTPS CONNECT
-   - 风险：客户端可能通过 SOCKS5 绕过（但 limited 模式也阻塞 SOCKS5）
+### 5.2 调用方模块
 
-### 边界限制
+| 调用方 | 用途 |
+|--------|------|
+| `codex-core` | 构建代理状态，启动代理，配置加载 |
+| `codex-tui` | 调试配置展示 |
+| `codex-tui_app_server` | 应用服务器会话中的网络代理管理 |
+| `codex-app-server` | 命令执行时的网络代理集成 |
 
-| 限制 | 说明 |
+### 5.3 被调用服务
+
+| 服务 | 用途 |
 |------|------|
-| 平台限制 | Unix Socket 代理仅 macOS |
-| 通配符限制 | 不支持全局 `*`，仅支持 `*.` 和 `**.` 前缀 |
-| 阻塞历史 | 最多保留 200 条阻塞请求 |
-| DNS 超时 | 2 秒，超时后默认允许 |
-| 证书存储 | 固定路径 `$CODEX_HOME/proxy/` |
+| DNS 解析器 | `tokio::net::lookup_host` 用于 DNS 重绑定防护 |
+| 文件系统 | CA 证书存储（`$CODEX_HOME/proxy/`） |
+| Unix Socket | 本地服务代理（macOS） |
 
-### 改进建议
+---
+
+## 6. 风险、边界与改进建议
+
+### 6.1 已知风险
+
+#### 6.1.1 DNS 重绑定攻击
+
+**风险**：攻击者控制 DNS 服务器，先返回公共 IP 通过检查，再返回私有 IP。
+
+**当前缓解**：
+- 请求时进行 DNS 解析检查（`host_resolves_to_non_public_ip`）
+- MITM 模式下在 CONNECT 后再次检查
+
+**限制**：
+- 2 秒超时后默认允许（避免可用性问题）
+- DNS TTL 窗口期内仍可能被攻击
+
+**建议**：
+- 考虑在传输层实施 IP 地址固定（pinning）
+- 企业环境建议配合防火墙/VPC 策略
+
+#### 6.1.2 MITM CA 私钥泄露
+
+**风险**：本地 CA 私钥被恶意软件获取，可签发任意域名的伪造证书。
+
+**当前缓解**：
+- 文件权限 0o600
+- 拒绝符号链接
+- 原子写入防止部分文件
+
+**建议**：
+- 考虑使用系统密钥链存储私钥
+- 定期轮换 CA 证书
+
+#### 6.1.3 Unix Socket 远程桥接
+
+**风险**：如果代理监听非回环地址，攻击者可利用 Unix Socket 代理访问本地服务。
+
+**当前缓解**：
+- 启用 Unix Socket 时强制回环绑定
+- 绝对路径要求
+
+#### 6.1.4 策略决策器（Policy Decider）绕过
+
+**风险**：自定义 decider 实现不当可能绕过安全策略。
+
+**当前缓解**：
+- 显式拒绝（denylist）始终优先于 decider
+- 本地 IP 阻止在 decider 之前执行
+
+### 6.2 边界条件
+
+| 边界 | 行为 |
+|------|------|
+| 允许列表为空 | 阻止所有请求（安全默认） |
+| DNS 解析失败 | 默认允许（避免误杀），依赖后续连接失败 |
+| DNS 解析超时（2s） | 默认允许 |
+| 配置热重载失败 | 保留旧配置，记录警告 |
+| CA 证书损坏 | 启动失败，需要手动删除 `$CODEX_HOME/proxy/` |
+| Unix Socket 不存在 | 连接时失败（BAD_GATEWAY） |
+| SOCKS5 UDP | 需要显式启用，Limited 模式下阻止 |
+
+### 6.3 改进建议
+
+#### 6.3.1 短期改进
+
+1. **增强 DNS 重绑定防护**
+   - 实现 DNS 响应缓存，减少重复查询
+   - 考虑在连接建立时再次验证 IP
+
+2. **配置验证增强**
+   - 启动时验证所有允许列表域名是否可解析
+   - 检测并警告潜在的配置错误（如 `*.com` 过于宽泛）
+
+3. **审计改进**
+   - 支持结构化日志输出（JSON）
+   - 添加请求/响应大小统计
+
+#### 6.3.2 中期改进
 
 1. **性能优化**
-   - 使用 LRU 缓存 DNS 解析结果
-   - 减少 `RwLock` 持有时间，考虑使用 `arc-swap` 进行配置热更新
+   - GlobSet 匹配优化（当前每次请求都重新读取配置）
+   - 连接池复用（当前每个请求新建连接）
 
 2. **可观测性**
-   - 添加指标导出（阻塞率、延迟、缓存命中率）
-   - 支持结构化日志输出到文件
+   - 添加 Prometheus 指标导出
+   - 支持分布式追踪（OpenTelemetry）
 
-3. **功能扩展**
-   - 支持 HTTP/2 代理（当前仅 HTTP/1）
-   - 支持基于时间的策略（工作时间限制）
-   - 支持按进程/用户细粒度控制
+3. **配置管理**
+   - 支持配置变更 webhook/回调
+   - 允许运行时修改允许列表而不重启
 
-4. **安全加固**
-   - 实现证书固定（pinning）防止 CA 替换
-   - 添加请求/响应体大小限制
-   - 支持 TLS 1.3 强制
+#### 6.3.3 长期改进
 
-5. **代码质量**
-   - 增加集成测试覆盖 SOCKS5 UDP 场景
-   - 统一错误类型，减少 `anyhow` 在库代码中的使用
-   - 提取公共的 "策略决策" 逻辑到独立 crate
+1. **协议支持**
+   - HTTP/2 代理支持（当前仅 HTTP/1.1）
+   - QUIC/HTTP3 支持
+
+2. **安全增强**
+   - 证书透明度（CT）日志检查
+   - 证书固定（Certificate Pinning）支持
+
+3. **多平台支持**
+   - Unix Socket 代理支持 Linux
+   - Windows 命名管道支持
 
 ---
 
-*文档生成时间：2026-03-21*
-*研究对象版本：基于 codex-rs/network-proxy 源代码*
+## 7. 测试覆盖
+
+### 7.1 单元测试
+
+| 测试文件 | 覆盖内容 |
+|----------|----------|
+| `config.rs` (tests) | 地址解析，绑定限制，配置默认值 |
+| `policy.rs` (tests) | 域名匹配，GlobSet 编译，IP 分类 |
+| `runtime.rs` (tests) | 策略评估，允许/拒绝列表更新，约束验证 |
+| `network_policy.rs` (tests) | 审计事件，decider 集成 |
+| `http_proxy.rs` (tests) | CONNECT 处理，方法限制，Host 头验证 |
+| `socks5.rs` (tests) | SOCKS5 TCP/UDP 策略执行 |
+| `mitm_tests.rs` | MITM 方法限制，主机不匹配检测 |
+| `certs.rs` (tests) | CA 密钥权限验证，符号链接拒绝 |
+
+### 7.2 集成测试
+
+- `core/src/network_proxy_loader_tests.rs`: 配置加载器集成测试
+- 端到端测试通过 `codex-core` 的测试套件执行
+
+---
+
+## 8. 配置示例
+
+### 8.1 基础配置（config.toml）
+
+```toml
+default_permissions = "workspace"
+
+[permissions.workspace.network]
+enabled = true
+proxy_url = "http://127.0.0.1:3128"
+enable_socks5 = true
+socks_url = "http://127.0.0.1:8081"
+allow_upstream_proxy = true
+mode = "full"
+allowed_domains = ["*.openai.com", "localhost", "127.0.0.1", "::1"]
+denied_domains = ["evil.example.com"]
+allow_local_binding = false
+mitm = false
+```
+
+### 8.2 Limited 模式配置
+
+```toml
+[permissions.workspace.network]
+enabled = true
+mode = "limited"  # 只读模式
+mitm = true       # 需要 MITM 来检查 HTTPS 方法
+allowed_domains = ["api.github.com"]
+```
+
+### 8.3 Unix Socket 配置（macOS）
+
+```toml
+[permissions.workspace.network]
+enabled = true
+allow_unix_sockets = ["/var/run/docker.sock"]
+# dangerously_allow_all_unix_sockets = false  # 危险选项
+```
+
+---
+
+## 9. 总结
+
+`codex-network-proxy` 是 Codex 安全架构的关键组件，通过多层防御机制（允许/拒绝列表、本地网络保护、Limited 模式、MITM 检查）为 AI 助手提供受控的网络访问能力。其设计充分考虑了企业合规、安全审计和易用性需求，同时通过热重载、OTEL 审计等特性满足生产环境要求。
+
+主要技术亮点：
+- 基于 Rama 框架的高性能异步代理
+- 灵活的域名策略（支持多级通配符）
+- 完善的 DNS 重绑定防护
+- 可选的 MITM 支持用于 HTTPS 深度检查
+- 全面的审计日志（OTEL 兼容）
+- 配置热重载和托管约束支持
