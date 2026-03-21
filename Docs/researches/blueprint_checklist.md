@@ -332,9 +332,9 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/responses-api-proxy/npm/bin
 - [x] [DIR] codex-rs/responses-api-proxy/src
 - [x] [DIR] codex-rs/rmcp-client
-- [ ] [DIR] codex-rs/rmcp-client/src
-- [ ] [DIR] codex-rs/rmcp-client/src/bin
-- [ ] [DIR] codex-rs/rmcp-client/tests
+- [x] [DIR] codex-rs/rmcp-client/src
+- [x] [DIR] codex-rs/rmcp-client/src/bin
+- [x] [DIR] codex-rs/rmcp-client/tests
 - [ ] [DIR] codex-rs/scripts
 - [ ] [DIR] codex-rs/secrets
 - [ ] [DIR] codex-rs/secrets/src
