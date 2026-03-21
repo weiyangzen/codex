@@ -328,9 +328,9 @@ Legend: `[ ]` pending, `[x]` researched.
 - [x] [DIR] codex-rs/protocol/src/prompts/permissions/sandbox_mode
 - [x] [DIR] codex-rs/protocol/src/prompts/realtime
 - [x] [DIR] codex-rs/responses-api-proxy
-- [ ] [DIR] codex-rs/responses-api-proxy/npm
-- [ ] [DIR] codex-rs/responses-api-proxy/npm/bin
-- [ ] [DIR] codex-rs/responses-api-proxy/src
+- [x] [DIR] codex-rs/responses-api-proxy/npm
+- [x] [DIR] codex-rs/responses-api-proxy/npm/bin
+- [x] [DIR] codex-rs/responses-api-proxy/src
 - [ ] [DIR] codex-rs/rmcp-client
 - [ ] [DIR] codex-rs/rmcp-client/src
 - [ ] [DIR] codex-rs/rmcp-client/src/bin
