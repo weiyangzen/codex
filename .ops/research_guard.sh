@@ -744,12 +744,25 @@ apply_success_updates_with_lock() {
   return 0
 }
 
+refresh_checklist_with_lock() {
+  exec 8>"$WRITE_LOCK_FILE"
+  flock -x 8
+  if ! bash .ops/generate_research_blueprint_checklist.sh >> "$LOG_FILE" 2>&1; then
+    flock -u 8 || true
+    exec 8>&-
+    return 1
+  fi
+  flock -u 8 || true
+  exec 8>&-
+  return 0
+}
+
 run_worker_once() {
   local token="$1"
   local claims_file items_file meta_file prompt_file task
   local run_rc apply_rc
 
-  if ! bash .ops/generate_research_blueprint_checklist.sh >> "$LOG_FILE" 2>&1; then
+  if ! refresh_checklist_with_lock; then
     set_state "failed_blueprint"
     log "error: failed to generate research blueprint checklist"
     return 1

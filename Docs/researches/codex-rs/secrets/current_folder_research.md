@@ -2,7 +2,7 @@
 
 ## 概述
 
-`codex-rs/secrets` 是 Codex 项目的本地机密管理模块，负责安全地存储、检索和管理用户机密（如 API 密钥、访问令牌等）。该模块采用分层架构设计，支持基于作用域的机密隔离，并使用 age 加密算法对存储的机密进行加密保护。
+`codex-secrets` 是 Codex 项目的 secrets 管理 crate，提供本地加密存储、密钥管理和敏感信息脱敏功能。它是 Codex 安全基础设施的核心组件，负责安全地存储 API 密钥、访问令牌等敏感数据。
 
 ---
 
@@ -10,235 +10,190 @@
 
 ### 核心职责
 
-1. **机密存储管理**：提供安全的本地机密存储机制，支持增删改查操作
-2. **作用域隔离**：支持全局作用域和基于环境的作用域，实现机密的多租户隔离
-3. **加密保护**：使用 age 加密算法和 scrypt 密钥派生，确保机密数据在静态存储时的安全性
-4. **密钥管理**：通过 OS Keyring（系统钥匙串）安全存储加密密钥，避免密钥泄露
-5. **敏感信息脱敏**：提供基于正则表达式的敏感信息检测和脱敏功能
+1. **安全存储管理**: 提供加密存储机制，使用 age 加密算法保护本地 secrets 文件
+2. **密钥派生与管理**: 通过 OS 密钥环（keyring）管理加密密钥，确保密钥不落盘
+3. **作用域隔离**: 支持 Global 和 Environment 两种作用域，实现 secrets 的精细化隔离
+4. **敏感信息脱敏**: 提供运行时敏感信息检测与脱敏功能，防止 secrets 泄露到日志或输出
 
 ### 使用场景
 
-- **用户 API 密钥存储**：存储 OpenAI API Key、AWS Access Key 等第三方服务凭证
-- **项目级机密隔离**：不同 Git 仓库/项目使用独立的机密空间
-- **日志和内存脱敏**：在日志记录和 AI 记忆生成时自动脱敏敏感信息
-- **CI/CD 环境**：在自动化流程中安全地注入和使用机密
+| 场景 | 说明 |
+|------|------|
+| CLI 工具存储 API Key | 用户通过 CLI 设置 OpenAI API Key，加密存储在本地 |
+| 项目级 Secrets 隔离 | 不同 Git 仓库使用独立的 environment scope 存储 secrets |
+| 日志脱敏 | 在生成记忆、输出日志时自动脱敏敏感信息 |
+| 安全审计 | 通过作用域过滤列出特定范围的 secrets |
 
 ---
 
 ## 功能点目的
 
-### 1. SecretName - 机密名称规范
+### 1. SecretName - 强类型密钥名称
 
-**目的**：确保机密名称符合安全规范，避免注入攻击和命名冲突。
+```rust
+pub struct SecretName(String);
+```
 
-**约束规则**：
-- 只能包含大写字母 (A-Z)、数字 (0-9) 和下划线 (_)
-- 不能为空字符串
-- 自动去除首尾空白字符
+**设计目的**:
+- 强制命名规范：仅允许大写字母、数字和下划线（如 `GITHUB_TOKEN`）
+- 编译期类型安全，防止非法密钥名流入系统
+- 与 shell 环境变量命名规范保持一致
 
-**设计理由**：
-- 使用大写字母和下划线符合环境变量命名惯例（如 `GITHUB_TOKEN`）
-- 严格的字符集限制防止路径遍历和注入攻击
-- 规范化处理确保名称的一致性
+### 2. SecretScope - 作用域隔离
 
-### 2. SecretScope - 机密作用域
+```rust
+pub enum SecretScope {
+    Global,                    // 全局作用域: global/{name}
+    Environment(String),       // 环境作用域: env/{environment_id}/{name}
+}
+```
 
-**目的**：实现机密的多级隔离，支持全局共享和项目级隔离两种模式。
+**设计目的**:
+- **Global**: 跨所有项目共享的 secrets（如用户级 API Key）
+- **Environment**: 基于 Git 仓库或工作目录隔离的 secrets
+- 通过 `canonical_key` 生成稳定的存储键，格式：`{scope}/{name}`
 
-**作用域类型**：
+### 3. LocalSecretsBackend - 本地加密存储后端
 
-| 类型 | 说明 | 键格式 |
-|------|------|--------|
-| `Global` | 全局作用域，所有项目共享 | `global/{name}` |
-| `Environment(String)` | 环境特定作用域，基于项目/环境隔离 | `env/{environment_id}/{name}` |
+**设计目的**:
+- 完全离线，不依赖外部服务
+- 使用 age 的 scrypt 方案进行密码学加密
+- 密钥通过 OS 密钥环管理（macOS Keychain、Windows Credential Manager、Linux Secret Service）
 
-**环境 ID 生成策略**：
-1. 优先使用 Git 仓库根目录名称（如 `my-project`）
-2. 非 Git 目录使用当前工作目录路径的 SHA256 哈希前 12 位（格式：`cwd-{hash}`）
+### 4. SecretsManager - 统一管理层
 
-### 3. LocalSecretsBackend - 本地机密后端
-
-**目的**：提供基于文件系统的本地机密存储实现，支持加密和原子写入。
-
-**核心特性**：
-- **加密存储**：使用 age 库进行基于口令的加密
-- **原子写入**：通过临时文件 + 重命名实现原子性写入，防止数据损坏
-- **版本控制**：支持文件格式版本升级（当前版本：1）
-- **跨平台兼容**：处理 Windows 平台的文件替换特殊逻辑
-
-### 4. SecretsManager - 机密管理器
-
-**目的**：作为统一的入口点，封装后端实现细节，提供类型安全的 API。
-
-**设计模式**：
-- 使用 `Arc<dyn SecretsBackend>` 实现后端可替换性
-- 支持依赖注入（`new_with_keyring_store`）便于测试
-- 当前仅支持 `Local` 后端，预留扩展接口
+**设计目的**:
+- 提供后端无关的统一接口
+- 支持可插拔的 backend 实现（当前仅 Local，预留扩展）
+- 线程安全（`Arc<dyn SecretsBackend> + Send + Sync`）
 
 ### 5. redact_secrets - 敏感信息脱敏
 
-**目的**：在日志、AI 记忆等输出中自动检测并脱敏敏感信息，防止机密泄露。
-
-**检测规则**：
-
-| 正则表达式 | 匹配内容 | 脱敏结果 |
-|-----------|---------|---------|
-| `sk-[A-Za-z0-9]{20,}` | OpenAI API Key | `[REDACTED_SECRET]` |
-| `\bAKIA[0-9A-Z]{16}\b` | AWS Access Key ID | `[REDACTED_SECRET]` |
-| `(?i)\bBearer\s+[A-Za-z0-9._\-]{16,}\b` | Bearer Token | `Bearer [REDACTED_SECRET]` |
-| `(?i)\b(api[_-]?key\|token\|secret\|password)\b(\s*[:=]\s*)(["']?)[^\s"']{8,}` | 通用密钥赋值 | 保留键名，脱敏值 |
+**设计目的**:
+- 防止 secrets 意外泄露到日志、记忆或网络传输
+- 基于正则表达式的最佳-effort检测
+- 覆盖常见密钥格式：OpenAI API Key、AWS Access Key、Bearer Token 等
 
 ---
 
 ## 具体技术实现
 
-### 关键数据结构
+### 1. 存储格式与加密方案
+
+**文件位置**: `{codex_home}/secrets/local.age`
+
+**加密方案**:
+```rust
+// 使用 age 库的 scrypt 方案
+let recipient = ScryptRecipient::new(passphrase);
+encrypt(&recipient, plaintext)
+```
+
+**文件格式** (解密后):
+```json
+{
+  "version": 1,
+  "secrets": {
+    "global/OPENAI_API_KEY": "sk-...",
+    "env/my-project/GITHUB_TOKEN": "ghp_..."
+  }
+}
+```
+
+### 2. 密钥派生流程
+
+```
+┌─────────────────┐
+│   codex_home    │──┐
+│  (e.g. ~/.codex)│  │
+└─────────────────┘  │  SHA256
+                     ├────────►  secrets|{hash_16}  ──────►  OS Keyring
+                     │                                      (service="codex")
+┌─────────────────┐  │
+│   "secrets|"    │──┘
+│   (prefix)      │
+└─────────────────┘
+```
+
+**代码路径**: `lib.rs:180-192`
+```rust
+pub(crate) fn compute_keyring_account(codex_home: &Path) -> String {
+    let canonical = codex_home.canonicalize().unwrap_or_else(|_| codex_home.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    let digest = hasher.finalize();
+    let hex = format!("{digest:x}");
+    let short = hex.get(..16).unwrap_or(hex.as_str());
+    format!("secrets|{short}")
+}
+```
+
+### 3. 原子写入机制
+
+**目的**: 防止写入过程中断导致文件损坏
+
+**实现** (`local.rs:201-271`):
+```rust
+fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    // 1. 创建临时文件 (exclusive create)
+    let tmp_path = dir.join(format!(".{LOCAL_SECRETS_FILENAME}.tmp-{pid}-{nonce}"));
+    
+    // 2. 写入并强制 sync
+    tmp_file.write_all(contents)?;
+    tmp_file.sync_all()?;
+    
+    // 3. 原子重命名
+    fs::rename(&tmp_path, path)?;
+    
+    // Windows 特殊处理: 如果目标存在，先删除再重命名
+}
+```
+
+### 4. Environment ID 生成
+
+**代码路径**: `lib.rs:141-162`
 
 ```rust
-// 机密名称（规范化包装类型）
-pub struct SecretName(String);
-
-// 机密作用域
-pub enum SecretScope {
-    Global,
-    Environment(String),
-}
-
-// 机密列表条目
-pub struct SecretListEntry {
-    pub scope: SecretScope,
-    pub name: SecretName,
-}
-
-// 后端类型枚举（预留扩展）
-pub enum SecretsBackendKind {
-    Local,
-}
-
-// 机密后端 trait（可扩展）
-pub trait SecretsBackend: Send + Sync {
-    fn set(&self, scope: &SecretScope, name: &SecretName, value: &str) -> Result<()>;
-    fn get(&self, scope: &SecretScope, name: &SecretName) -> Result<Option<String>>;
-    fn delete(&self, scope: &SecretScope, name: &SecretName) -> Result<bool>;
-    fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>>;
-}
-
-// 管理器（统一入口）
-pub struct SecretsManager {
-    backend: Arc<dyn SecretsBackend>,
-}
-
-// 本地后端实现
-pub struct LocalSecretsBackend {
-    codex_home: PathBuf,
-    keyring_store: Arc<dyn KeyringStore>,
-}
-
-// 机密文件格式（序列化结构）
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-struct SecretsFile {
-    version: u8,
-    secrets: BTreeMap<String, String>,
+pub fn environment_id_from_cwd(cwd: &Path) -> String {
+    // 策略1: 使用 Git 仓库名
+    if let Some(repo_root) = get_git_repo_root(cwd)
+        && let Some(name) = repo_root.file_name() {
+        return name.to_string_lossy().trim().to_string();
+    }
+    
+    // 策略2: 使用工作目录路径哈希
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    let digest = hasher.finalize();
+    let short = hex.get(..12).unwrap_or(hex.as_str());
+    format!("cwd-{short}")
 }
 ```
 
-### 关键流程
+### 5. 脱敏正则表达式
 
-#### 1. 机密存储流程
+**代码路径**: `sanitizer.rs:4-11`
 
+| 正则 | 匹配内容 | 替换结果 |
+|------|----------|----------|
+| `sk-[A-Za-z0-9]{20,}` | OpenAI API Key | `[REDACTED_SECRET]` |
+| `\bAKIA[0-9A-Z]{16}\b` | AWS Access Key ID | `[REDACTED_SECRET]` |
+| `(?i)\bBearer\s+[A-Za-z0-9._\-]{16,}\b` | Bearer Token | `Bearer [REDACTED_SECRET]` |
+| `(?i)\b(api[_-]?key\|token\|secret\|password)\b(\s*[:=]\s*)(["']?)[^\s"']{8,}` | 赋值语句 | `$1$2$3[REDACTED_SECRET]` |
+
+### 6. 内存安全处理
+
+**密钥擦除** (`local.rs:284-291`):
+```rust
+fn wipe_bytes(bytes: &mut [u8]) {
+    for byte in bytes {
+        // 使用 volatile write 防止编译器优化掉擦除操作
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    compiler_fence(Ordering::SeqCst);
+}
 ```
-用户调用 set(scope, name, value)
-    ↓
-验证 value 非空
-    ↓
-生成 canonical_key（如 "env/my-project/GITHUB_TOKEN"）
-    ↓
-加载现有 SecretsFile（解密）
-    ↓
-插入/更新键值对
-    ↓
-序列化并加密
-    ↓
-原子写入文件（临时文件 → 重命名）
-```
-
-#### 2. 密钥派生流程
-
-```
-需要加密/解密时
-    ↓
-计算 keyring_account（基于 codex_home 路径的 SHA256 哈希）
-    ↓
-查询 OS Keyring（service="codex", account="secrets|{hash}"）
-    ↓
-如果存在 → 返回现有密钥
-如果不存在 → 生成 32 字节随机密钥 → Base64 编码 → 存入 Keyring
-    ↓
-使用密钥通过 age/scrypt 进行加密/解密
-```
-
-#### 3. 文件原子写入流程
-
-```
-写入内容
-    ↓
-生成临时文件路径：.{filename}.tmp-{pid}-{timestamp}
-    ↓
-创建新文件（O_CREATE | O_EXCL）
-    ↓
-写入内容
-    ↓
-调用 sync_all() 确保数据落盘
-    ↓
-重命名临时文件到目标路径
-    ↓
-Windows 特殊处理：如果目标存在，先删除再重命名
-    ↓
-清理临时文件（失败时）
-```
-
-#### 4. 敏感信息脱敏流程
-
-```
-输入文本
-    ↓
-顺序应用多个正则表达式替换：
-  1. OpenAI Key 模式 → [REDACTED_SECRET]
-  2. AWS Key 模式 → [REDACTED_SECRET]
-  3. Bearer Token 模式 → Bearer [REDACTED_SECRET]
-  4. 通用密钥赋值模式 → 保留键名和分隔符，脱敏值
-    ↓
-返回脱敏后的文本
-```
-
-### 加密实现细节
-
-**使用的加密库**：`age` crate（版本 0.11.1）
-
-**加密方案**：
-- **算法**：age 格式（基于 X25519 + ChaCha20-Poly1305）
-- **密钥派生**：scrypt（内存困难型 KDF，抵抗硬件暴力破解）
-- **密钥来源**：32 字节随机数，Base64 编码后存储于 OS Keyring
-
-**文件格式**：
-- 存储路径：`{codex_home}/secrets/local.age`
-- 文件内容：加密后的 JSON（SecretsFile 结构）
-- 明文结构：`{"version": 1, "secrets": {"key": "value", ...}}`
-
-### 安全考虑
-
-1. **内存安全**：
-   - 使用 `age::secrecy::SecretString` 包装敏感字符串
-   - 生成密钥后使用 `wipe_bytes()` 清零临时缓冲区
-   - 使用 `compiler_fence(Ordering::SeqCst)` 防止编译器优化掉清零操作
-
-2. **存储安全**：
-   - 加密密钥与数据分离（密钥在 Keyring，数据在文件）
-   - 原子写入防止数据损坏
-   - 文件权限由操作系统保证（建议设置 umask）
-
-3. **传输安全**：
-   - 脱敏功能防止机密通过日志/AI 响应泄露
 
 ---
 
@@ -248,42 +203,49 @@ Windows 特殊处理：如果目标存在，先删除再重命名
 
 ```
 codex-rs/secrets/
-├── Cargo.toml              # 包配置和依赖
-├── BUILD.bazel             # Bazel 构建配置
+├── Cargo.toml           # 依赖: age, keyring, regex, sha2, etc.
+├── BUILD.bazel          # Bazel 构建配置
 └── src/
-    ├── lib.rs              # 公共 API（SecretsManager、SecretName、SecretScope）
-    ├── local.rs            # LocalSecretsBackend 实现
-    └── sanitizer.rs        # 敏感信息脱敏功能
+    ├── lib.rs           # 公共 API: SecretsManager, SecretName, SecretScope
+    ├── local.rs         # LocalSecretsBackend 实现
+    └── sanitizer.rs     # redact_secrets 脱敏实现
 ```
 
-### 关键代码路径
+### 关键类型与方法
 
-| 功能 | 文件 | 行号范围 |
-|------|------|---------|
-| SecretName 验证 | `src/lib.rs` | 24-48 |
-| SecretScope 定义 | `src/lib.rs` | 50-73 |
-| SecretsBackend trait | `src/lib.rs` | 88-93 |
-| SecretsManager 实现 | `src/lib.rs` | 96-139 |
-| 环境 ID 生成 | `src/lib.rs` | 141-162 |
-| Keyring 账户计算 | `src/lib.rs` | 180-192 |
-| LocalSecretsBackend 结构 | `src/local.rs` | 54-58 |
-| set/get/delete/list 实现 | `src/local.rs` | 68-108 |
-| 文件加载/保存 | `src/local.rs` | 118-157 |
-| 密钥派生 | `src/local.rs` | 159-181 |
-| 原子写入 | `src/local.rs` | 201-271 |
-| 加密/解密 | `src/local.rs` | 293-301 |
-| 正则脱敏规则 | `src/sanitizer.rs` | 4-11 |
-| redact_secrets 函数 | `src/sanitizer.rs` | 15-22 |
+| 类型/方法 | 文件 | 行号 | 说明 |
+|-----------|------|------|------|
+| `SecretName` | lib.rs | 23-48 | 强类型密钥名，强制大写+下划线规范 |
+| `SecretScope` | lib.rs | 50-73 | 作用域枚举，支持 Global/Environment |
+| `SecretsBackend` trait | lib.rs | 88-93 | 后端抽象接口 |
+| `SecretsManager` | lib.rs | 95-139 | 统一管理器，线程安全 |
+| `environment_id_from_cwd` | lib.rs | 141-162 | 基于 CWD 生成环境 ID |
+| `compute_keyring_account` | lib.rs | 180-192 | 派生 keyring 账户名 |
+| `LocalSecretsBackend` | local.rs | 54-199 | 本地加密存储实现 |
+| `write_file_atomically` | local.rs | 201-271 | 原子文件写入 |
+| `generate_passphrase` | local.rs | 273-282 | 生成 32 字节随机密钥 |
+| `wipe_bytes` | local.rs | 284-291 | 安全擦除内存 |
+| `encrypt/decrypt_with_passphrase` | local.rs | 293-301 | age 加密/解密 |
+| `redact_secrets` | sanitizer.rs | 15-22 | 敏感信息脱敏 |
 
-### 外部调用点
-
-**被调用方**（使用 secrets 的代码）：
+### 调用方引用
 
 | 调用方 | 用途 |
 |--------|------|
-| `codex-rs/core/src/memories/phase1.rs` | AI 记忆生成时脱敏敏感信息（`redact_secrets`） |
+| `codex-core/src/memories/phase1.rs:26` | `use codex_secrets::redact_secrets` |
+| `codex-core/src/memories/phase1.rs:385-387` | 记忆生成时脱敏 raw_memory, rollout_summary, rollout_slug |
+| `codex-core/Cargo.toml:57` | 依赖 `codex-secrets` |
 
-**注意**：当前 `SecretsManager` 和 `SecretsBackend` 主要在模块内部使用，尚未发现外部直接调用的代码。这可能是预留的扩展接口，用于未来实现 CLI 机密管理命令或配置中的机密引用功能。
+### 被调用方（依赖）
+
+| 依赖 | 用途 |
+|------|------|
+| `codex-keyring-store` | OS 密钥环抽象，存储加密密钥 |
+| `age` | 现代加密库，提供文件加密 |
+| `sha2` | SHA256 哈希，用于派生 keyring 账户名 |
+| `regex` | 脱敏正则匹配 |
+| `rand` | 生成高熵随机密钥 |
+| `serde/json` | secrets 文件序列化 |
 
 ---
 
@@ -291,145 +253,113 @@ codex-rs/secrets/
 
 ### 内部依赖
 
-| 依赖包 | 用途 |
-|--------|------|
-| `codex-keyring-store` | OS Keyring 抽象接口（`KeyringStore`、`DefaultKeyringStore`、`MockKeyringStore`） |
+```
+codex-secrets
+├── codex-keyring-store (workspace)
+│   ├── keyring crate (OS keyring bindings)
+│   └── 支持 MockKeyringStore (测试)
+```
 
 ### 外部依赖
 
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| `age` | 0.11.1 | 现代加密文件格式，用于机密文件加密 |
-| `anyhow` | 1.x | 错误处理和传播 |
-| `base64` | 0.22.1 | 密钥的 Base64 编码 |
-| `rand` | 0.9 | 生成高熵随机密钥 |
-| `regex` | 1.12.3 | 敏感信息检测模式 |
+| Crate | 版本 | 用途 |
+|-------|------|------|
+| `age` | 0.11.1 | 现代加密，scrypt 密钥派生 |
+| `keyring` | 3.6 | OS 密钥环访问 |
+| `regex` | 1.12.3 | 脱敏正则 |
+| `sha2` | 0.10 | SHA256 哈希 |
+| `rand` | 0.9 | 安全随机数生成 |
+| `base64` | 0.22.1 | 密钥编码 |
 | `schemars` | 0.8.22 | JSON Schema 生成 |
-| `serde` | 1.x | 机密文件序列化 |
-| `serde_json` | 1.x | JSON 格式处理 |
-| `sha2` | 0.10 | 路径哈希计算 |
-| `tracing` | 0.1.44 | 日志追踪 |
+| `serde` | 1 | 序列化 |
 
-### OS Keyring 交互
+### OS 密钥环集成
 
-通过 `codex-keyring-store` 抽象层与系统钥匙串交互：
-
-- **macOS**：Keychain Services（`apple-native` feature）
-- **Linux**：Secret Service API（`linux-native-async-persistent` feature）
-- **Windows**：Windows Credential Manager（`windows-native` feature）
-- **FreeBSD/OpenBSD**：同步 Secret Service（`sync-secret-service` feature）
-
-**Keyring 条目结构**：
-- Service: `"codex"`
-- Account: `"secrets|{hash}"`（基于 codex_home 路径的 SHA256 前 16 位）
-- Value: Base64 编码的 32 字节随机密钥
+| 平台 | 后端 | 说明 |
+|------|------|------|
+| macOS | Keychain | `apple-native` feature |
+| Windows | Credential Manager | `windows-native` feature |
+| Linux | Secret Service | `linux-native-async-persistent` feature |
+| FreeBSD/OpenBSD | Secret Service | `sync-secret-service` feature |
 
 ---
 
 ## 风险、边界与改进建议
 
-### 已知风险
+### 当前风险
 
-1. **密钥丢失风险**：
-   - 如果 OS Keyring 中的密钥被删除，所有已存储的机密将无法解密
-   - 没有密钥备份/恢复机制
+1. **密钥丢失风险**
+   - 如果 OS 密钥环中的密钥被删除，所有 secrets 将永久无法解密
+   - 没有密钥备份或恢复机制
 
-2. **正则脱敏局限**：
-   - 基于正则的脱敏是启发式的，可能漏检或误报
-   - 新型机密格式（如新版本的 API Key）可能无法识别
+2. **正则脱敏局限**
+   - 基于正则的脱敏是 best-effort，可能漏检新型密钥格式
+   - 高熵字符串可能被误报或漏报
 
-3. **并发访问**：
-   - 当前实现没有文件级锁，多进程并发写入可能导致数据丢失
-   - 依赖原子写入的 last-write-wins 语义
+3. **单点故障**
+   - 所有 secrets 存储在单个加密文件中
+   - 文件损坏导致全部 secrets 丢失
 
-4. **内存泄露**：
-   - 尽管有清零措施，但 Rust 的内存模型无法保证绝对安全
-   - SecretString 的底层实现可能存在内存复制
+4. **并发访问**
+   - 当前实现没有文件级锁
+   - 多进程并发写入可能导致数据丢失
 
 ### 边界条件
 
-1. **空值处理**：
-   - 机密值不能为空字符串（`set` 会返回错误）
-   - 机密名称不能为空或仅包含空白字符
-
-2. **文件版本**：
-   - 支持的最大版本号为 1
-   - 遇到更高版本会返回错误（向前兼容性保护）
-
-3. **路径长度**：
-   - 临时文件名包含 PID 和时间戳，在极端路径长度下可能失败
-
-4. **Keyring 限制**：
-   - 某些 CI 环境或容器可能没有可用的 Keyring 服务
-   - 测试环境使用 `MockKeyringStore` 模拟
+| 边界 | 行为 |
+|------|------|
+| 空密钥名 | `SecretName::new("")` 返回 Err |
+| 非法字符 | 包含小写字母返回 Err |
+| 空密钥值 | `set()` 返回 Err |
+| 密钥不存在 | `get()` 返回 `Ok(None)` |
+| 文件版本不兼容 | `load_file()` 返回 Err |
+| keyring 不可用 | 操作返回 Err，提示用户 |
 
 ### 改进建议
 
-1. **功能扩展**：
-   - 实现 CLI 命令（`codex secrets set/get/list/delete`）
-   - 支持机密引用语法（如 `${secrets.GITHUB_TOKEN}`）
-   - 添加机密过期和轮换机制
+1. **备份与恢复**
+   - 提供密钥导出/导入功能（如 QR 码、助记词）
+   - 支持云备份（可选，加密后上传）
 
-2. **安全增强**：
-   - 添加密钥备份/恢复功能（如助记词）
-   - 实现文件级锁，支持多进程安全访问
-   - 定期密钥轮换机制
+2. **增强脱敏**
+   - 引入 ML 模型检测敏感信息
+   - 支持用户自定义脱敏规则
 
-3. **可观测性**：
-   - 添加审计日志（机密访问记录）
-   - 脱敏统计（检测到的敏感信息数量）
+3. **并发安全**
+   - 添加文件级锁（如 `fs2::FileExt::lock`）
+   - 考虑使用 SQLite 替代 JSON 文件
 
-4. **性能优化**：
-   - 缓存解密后的 SecretsFile，减少重复解密
-   - 延迟加载（首次访问时才初始化）
+4. **审计日志**
+   - 记录 secrets 访问日志（只记录访问行为，不记录值）
+   - 支持 SIEM 集成
 
-5. **测试覆盖**：
-   - 添加并发写入测试
-   - 添加故障恢复测试（损坏文件、Keyring 不可用等场景）
-   - 跨平台测试（特别是 Windows 原子写入逻辑）
+5. **扩展后端**
+   - 实现 `CloudSecretsBackend`（如 AWS Secrets Manager、Azure Key Vault）
+   - 支持团队级 secrets 共享
 
-6. **文档完善**：
-   - 添加架构决策记录（ADR）
-   - 编写用户-facing 的机密管理指南
-   - 记录威胁模型和安全假设
+6. **密钥轮换**
+   - 支持加密密钥自动轮换
+   - 旧密钥解密后使用新密钥重新加密
 
 ---
 
-## 附录：配置示例
+## 测试覆盖
 
-### 机密文件位置
-
-```
-~/.codex/
-└── secrets/
-    └── local.age          # 加密的机密存储文件
-```
-
-### Keyring 条目示例
-
-```
-Service: codex
-Account: secrets|a1b2c3d4e5f67890
-Value:   base64_encoded_random_key_32_bytes...
-```
-
-### 使用示例（假设的 CLI）
-
-```bash
-# 设置全局机密
-codex secrets set GITHUB_TOKEN ghp_xxxxxxxx --global
-
-# 设置项目级机密
-codex secrets set AWS_ACCESS_KEY_ID AKIA... --env
-
-# 列出当前环境的机密
-codex secrets list
-
-# 删除机密
-codex secrets delete GITHUB_TOKEN
-```
+| 测试文件 | 测试内容 |
+|----------|----------|
+| `lib.rs:199-245` | manager_round_trips_local_backend, environment_id_fallback_has_cwd_prefix |
+| `local.rs:332-410` | load_file_rejects_newer_schema_versions, set_fails_when_keyring_is_unavailable, save_file_does_not_leave_temp_files |
+| `sanitizer.rs:32-40` | load_regex (编译期正则验证) |
 
 ---
 
-*文档生成时间：2026-03-21*
-*基于代码版本：codex-rs/secrets @ main*
+## 相关文档
+
+- `codex-rs/keyring-store/src/lib.rs`: 密钥环存储抽象
+- `codex-rs/core/src/memories/phase1.rs`: 脱敏调用方
+- `codex-rs/core/src/memories/README.md`: 记忆系统文档
+
+---
+
+*研究日期: 2026-03-21*
+*版本: 基于 codex-rs/secrets 当前 main 分支*

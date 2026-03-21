@@ -1,0 +1,19 @@
+请研究DIR codex-rs/shell-command。
+
+你在项目仓库根目录工作。请完成以下任务并直接修改文件：
+1) 深入阅读目标对象与其上下文依赖（调用方、被调用方、配置、测试、脚本、文档）。
+2) 产出详尽研究文档到：/home/sansha/Github/codex/Docs/researches/codex-rs/shell-command/current_folder_research.md
+   - 必须包含章节：
+     - 场景与职责
+     - 功能点目的
+     - 具体技术实现（关键流程/数据结构/协议/命令）
+     - 关键代码路径与文件引用
+     - 依赖与外部交互
+     - 风险、边界与改进建议
+
+要求：
+- 仅修改该研究文档及其必要目录。
+- 不要修改 checklist / todo 文件。
+- 不要执行 git commit / git push。
+- 必须是实质研究，不要空文档或模板占位。
+- 使用 kimi cli 非 REPL（print）模式执行本任务，模型使用 k2p5。
