@@ -1,418 +1,416 @@
-# DIR codex-rs/ollama/src 深度研究文档
+# Research: codex-rs/ollama/src
 
-## 1. 场景与职责
+## 概述
 
-`codex-rs/ollama/src` 是 Codex CLI 的 **Ollama 本地开源模型提供者集成模块**。该模块负责与本地运行的 Ollama 服务器进行交互，使用户能够在不依赖 OpenAI 云端 API 的情况下，使用本地部署的开源大语言模型（如 gpt-oss:20b）。
+`codex-rs/ollama/src` 是 Codex CLI 的 Ollama 本地模型提供者集成模块，负责与本地运行的 Ollama 服务器进行通信，实现模型拉取、版本检查和进度报告等功能。该模块是 Codex 支持开源本地模型（OSS）的关键组件。
 
-### 1.1 核心职责
+---
+
+## 场景与职责
+
+### 核心场景
+
+1. **本地 OSS 模型支持**：当用户使用 `--oss` 标志时，Codex 需要与本地 Ollama 服务器通信，使用本地模型替代 OpenAI 云端 API
+2. **模型自动拉取**：如果指定的模型不存在于本地，自动触发 `ollama pull` 操作
+3. **版本兼容性检查**：确保 Ollama 服务器版本支持 Responses API（最低版本 0.13.4）
+4. **进度可视化**：在 CLI 和 TUI 中显示模型下载进度
+
+### 职责边界
 
 | 职责 | 说明 |
 |------|------|
-| **服务器发现与连接** | 检测本地 Ollama 服务器是否运行（默认端口 11434） |
-| **模型管理** | 查询本地可用模型列表，按需拉取新模型 |
-| **版本兼容性检查** | 验证 Ollama 版本是否支持 Responses API（≥0.13.4） |
-| **下载进度报告** | 提供 CLI 和 TUI 两种进度展示方式 |
-| **OpenAI 兼容层检测** | 自动识别 OpenAI 兼容端点（/v1）与原生 Ollama API |
-
-### 1.2 在架构中的位置
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Codex CLI (tui/exec)                    │
-├─────────────────────────────────────────────────────────────┤
-│                  codex_utils_oss (OSS工具集)                  │
-│         ┌─────────────────┬─────────────────┐               │
-│         │   codex_lmstudio │  codex_ollama   │  ← 本模块     │
-│         │   (LM Studio)    │   (Ollama)      │               │
-│         └─────────────────┴─────────────────┘               │
-├─────────────────────────────────────────────────────────────┤
-│              codex_core::model_provider_info                 │
-│                   (提供者配置与抽象层)                        │
-└─────────────────────────────────────────────────────────────┘
-```
+| 服务器发现与连接 | 通过 `OllamaClient` 建立与本地 Ollama 实例的 HTTP 连接 |
+| 模型管理 | 查询本地模型列表 (`fetch_models`)、拉取新模型 (`pull_model_stream`) |
+| 版本检查 | 获取 Ollama 版本并验证是否支持 Responses API |
+| 进度报告 | 提供 `PullProgressReporter` trait 及 CLI/TUI 实现 |
+| URL 处理 | 支持 OpenAI 兼容端点 (`/v1`) 和原生 Ollama API (`/api`) |
 
 ---
 
-## 2. 功能点目的
+## 功能点目的
 
-### 2.1 主要功能模块
+### 1. 客户端连接 (`client.rs`)
 
-| 功能模块 | 源文件 | 目的 |
-|---------|--------|------|
-| `OllamaClient` | `client.rs` | HTTP 客户端封装，处理与 Ollama 服务器的所有通信 |
-| `PullEvent` / `PullProgressReporter` | `pull.rs` | 模型拉取事件定义与进度报告 trait 实现 |
-| `pull_events_from_value` | `parser.rs` | 解析 Ollama 流式响应中的 JSON 事件 |
-| URL 处理 | `url.rs` | 处理 OpenAI 兼容端点与原生 Ollama API 的 URL 转换 |
-| 环境准备 | `lib.rs` | 高阶 API：`ensure_oss_ready()` 和 `ensure_responses_supported()` |
+**目的**：建立与 Ollama 服务器的可靠连接，提供模型查询和拉取功能。
 
-### 2.2 默认模型配置
+**关键功能**：
+- `OllamaClient::try_from_oss_provider()` - 从配置创建客户端并验证服务器可达性
+- `probe_server()` - 健康检查，支持 OpenAI 兼容端点 (`/v1/models`) 和原生端点 (`/api/tags`)
+- `fetch_models()` - 获取本地可用模型列表
+- `fetch_version()` - 获取 Ollama 服务器版本
+- `pull_model_stream()` - 流式拉取模型，返回 `PullEvent` 流
+- `pull_with_reporter()` - 带进度报告的高级拉取接口
 
-```rust
-pub const DEFAULT_OSS_MODEL: &str = "gpt-oss:20b";
-```
+### 2. 进度报告 (`pull.rs`)
 
-当用户使用 `--oss` 参数但未指定模型时，默认使用 `gpt-oss:20b` 模型。
+**目的**：将模型拉取的底层事件转换为用户可见的进度信息。
 
-### 2.3 版本兼容性矩阵
+**关键组件**：
+- `PullEvent` 枚举 - 表示拉取过程中的各种事件（状态更新、块进度、成功、错误）
+- `PullProgressReporter` trait - 进度报告抽象接口
+- `CliProgressReporter` - 命令行进度条实现（显示下载速度、百分比、总大小）
+- `TuiProgressReporter` - TUI 进度报告（当前委托给 CLI 实现）
 
-| Ollama 版本 | 支持状态 | 说明 |
-|------------|---------|------|
-| 0.0.0 (开发版) | ✅ 支持 | 开发版本特殊处理 |
-| < 0.13.4 | ❌ 不支持 | 报错提示升级 |
-| ≥ 0.13.4 | ✅ 支持 | 正式支持 Responses API |
+### 3. 事件解析 (`parser.rs`)
+
+**目的**：将 Ollama API 返回的 JSON 响应解析为结构化的 `PullEvent`。
+
+**关键功能**：
+- `pull_events_from_value()` - 解析 JSON 对象，提取状态、摘要、总大小、已完成大小等信息
+
+### 4. URL 处理 (`url.rs`)
+
+**目的**：处理 OpenAI 兼容端点和原生 Ollama API 的 URL 转换。
+
+**关键功能**：
+- `is_openai_compatible_base_url()` - 检测 URL 是否指向 OpenAI 兼容端点（以 `/v1` 结尾）
+- `base_url_to_host_root()` - 将 `/v1` 后缀的 URL 转换为 Ollama 原生 API 根路径
+
+### 5. 库入口 (`lib.rs`)
+
+**目的**：提供高层 API 供其他模块使用。
+
+**关键功能**：
+- `DEFAULT_OSS_MODEL` - 默认 OSS 模型 `"gpt-oss:20b"`
+- `ensure_oss_ready()` - 完整的 OSS 环境准备流程（检查服务器、检查模型、按需拉取）
+- `ensure_responses_supported()` - 验证 Ollama 版本是否支持 Responses API（>= 0.13.4）
 
 ---
 
-## 3. 具体技术实现
+## 具体技术实现
 
-### 3.1 关键数据结构
+### 关键流程
 
-#### 3.1.1 OllamaClient
+#### 1. OSS 环境准备流程 (`ensure_oss_ready`)
 
 ```rust
-pub struct OllamaClient {
-    client: reqwest::Client,      // HTTP 客户端
-    host_root: String,            // 服务器根地址（如 http://localhost:11434）
-    uses_openai_compat: bool,     // 是否使用 OpenAI 兼容模式
+pub async fn ensure_oss_ready(config: &Config) -> std::io::Result<()> {
+    // 1. 确定要使用的模型
+    let model = config.model.as_ref().unwrap_or(DEFAULT_OSS_MODEL);
+    
+    // 2. 创建客户端并验证服务器可达
+    let ollama_client = OllamaClient::try_from_oss_provider(config).await?;
+    
+    // 3. 查询本地模型列表
+    match ollama_client.fetch_models().await {
+        Ok(models) => {
+            // 4. 如果模型不存在，触发拉取
+            if !models.iter().any(|m| m == model) {
+                let mut reporter = CliProgressReporter::new();
+                ollama_client.pull_with_reporter(model, &mut reporter).await?;
+            }
+        }
+        Err(err) => {
+            // 非致命错误，上层可能稍后处理
+            tracing::warn!("Failed to query local models: {}", err);
+        }
+    }
+    Ok(())
 }
 ```
 
-#### 3.1.2 PullEvent（模型拉取事件）
+#### 2. 模型拉取流处理 (`pull_model_stream`)
+
+```rust
+pub async fn pull_model_stream(&self, model: &str) -> io::Result<BoxStream<'static, PullEvent>> {
+    // 1. 发送 POST /api/pull 请求
+    let resp = self.client.post(url)
+        .json(&json!({"model": model, "stream": true}))
+        .send().await?;
+    
+    // 2. 处理 SSE 流式响应
+    let s = async_stream::stream! {
+        while let Some(chunk) = stream.next().await {
+            // 3. 按行解析 JSON
+            while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
+                let line = buf.split_to(pos + 1);
+                if let Ok(value) = serde_json::from_str::<JsonValue>(text) {
+                    // 4. 转换为 PullEvent
+                    for ev in pull_events_from_value(&value) { yield ev; }
+                    // 5. 检查错误或成功状态
+                    if error_detected { yield PullEvent::Error(...); return; }
+                    if status == "success" { yield PullEvent::Success; return; }
+                }
+            }
+        }
+    };
+    Ok(Box::pin(s))
+}
+```
+
+#### 3. 进度报告渲染 (`CliProgressReporter`)
+
+```rust
+impl PullProgressReporter for CliProgressReporter {
+    fn on_event(&mut self, event: &PullEvent) -> io::Result<()> {
+        match event {
+            PullEvent::Status(status) => {
+                // 显示状态文本（跳过 "pulling manifest" 减少噪音）
+            }
+            PullEvent::ChunkProgress { digest, total, completed } => {
+                // 按 digest 聚合进度
+                // 计算总进度百分比
+                // 显示：done_gb/total_gb (pct%) speed_mb/s
+            }
+            PullEvent::Success => { /* 换行结束 */ }
+            PullEvent::Error(_) => { /* 由调用者处理 */ }
+        }
+    }
+}
+```
+
+### 数据结构
+
+#### `OllamaClient`
+
+```rust
+pub struct OllamaClient {
+    client: reqwest::Client,      // HTTP 客户端（5秒连接超时）
+    host_root: String,            // 服务器根地址（如 http://localhost:11434）
+    uses_openai_compat: bool,     // 是否使用 OpenAI 兼容端点
+}
+```
+
+#### `PullEvent`
 
 ```rust
 pub enum PullEvent {
-    Status(String),               // 状态消息（如 "verifying", "writing"）
-    ChunkProgress {               // 分块进度
+    Status(String),                // 状态消息（如 "verifying", "writing"）
+    ChunkProgress {
         digest: String,           // 层摘要（如 sha256:abc...）
         total: Option<u64>,       // 总字节数
         completed: Option<u64>,   // 已完成字节数
     },
-    Success,                      // 拉取成功
-    Error(String),                // 错误消息
+    Success,                       // 拉取完成
+    Error(String),                 // 错误消息
 }
 ```
 
-#### 3.1.3 PullProgressReporter Trait
+#### `CliProgressReporter`
 
 ```rust
-pub trait PullProgressReporter {
-    fn on_event(&mut self, event: &PullEvent) -> io::Result<()>;
+pub struct CliProgressReporter {
+    printed_header: bool,         // 是否已打印头部信息
+    last_line_len: usize,         // 上一行长度（用于清屏）
+    last_completed_sum: u64,      // 上次完成字节数（计算速度）
+    last_instant: Instant,        // 上次更新时间
+    totals_by_digest: HashMap<String, (u64, u64)>, // 按 digest 跟踪进度
 }
 ```
 
-实现者：
-- `CliProgressReporter`：命令行进度条（stderr 输出）
-- `TuiProgressReporter`：TUI 模式进度报告（目前委托给 CLI 实现）
+### 协议与 API
 
-### 3.2 关键流程
-
-#### 3.2.1 客户端创建流程
-
-```
-try_from_oss_provider(config)
-    ↓
-从 config.model_providers 获取 "ollama" 提供者配置
-    ↓
-try_from_provider(provider)
-    ↓
-解析 base_url → 检测 OpenAI 兼容模式 → 提取 host_root
-    ↓
-构建 reqwest::Client（5秒连接超时）
-    ↓
-probe_server() 健康检查
-    ↓
-返回 OllamaClient 或返回连接错误
-```
-
-**关键代码路径**：`client.rs:31-75`
-
-#### 3.2.2 服务器探测逻辑
-
-```rust
-async fn probe_server(&self) -> io::Result<()> {
-    let url = if self.uses_openai_compat {
-        format!("{}/v1/models", self.host_root)  // OpenAI 兼容端点
-    } else {
-        format!("{}/api/tags", self.host_root)   // Ollama 原生端点
-    };
-    // 发送 GET 请求，失败返回 OLLAMA_CONNECTION_ERROR
-}
-```
-
-**连接错误提示**：
-```
-No running Ollama server detected. Start it with: `ollama serve` (after installing).
-Install instructions: https://github.com/ollama/ollama?tab=readme-ov-file#ollama
-```
-
-#### 3.2.3 模型拉取流程
-
-```
-pull_with_reporter(model, reporter)
-    ↓
-pull_model_stream(model) → 返回 BoxStream<'static, PullEvent>
-    ↓
-POST /api/pull {"model": "...", "stream": true}
-    ↓
-异步流解析（async_stream）
-    ↓
-逐行读取 NDJSON → parser::pull_events_from_value()
-    ↓
-Yield PullEvent 到调用方
-    ↓
-reporter.on_event() 更新进度显示
-```
-
-**流式解析关键代码**（`client.rs:178-208`）：
-- 使用 `async_stream::stream!` 宏创建异步流
-- 使用 `BytesMut` 缓冲区处理分块数据
-- 按 `\n` 分割行，解析每行的 JSON
-
-#### 3.2.4 版本检查流程
-
-```rust
-pub async fn ensure_responses_supported(provider: &ModelProviderInfo) -> io::Result<()> {
-    let client = OllamaClient::try_from_provider(provider).await?;
-    let Some(version) = client.fetch_version().await? else {
-        return Ok(());  // 无法获取版本时放行
-    };
-    
-    if supports_responses(&version) {
-        return Ok(());
-    }
-    
-    Err(io::Error::other(format!(
-        "Ollama {version} is too old. Codex requires Ollama {min} or newer."
-    )))
-}
-```
-
-### 3.3 协议与 API 端点
+#### Ollama 原生 API
 
 | 端点 | 方法 | 用途 |
 |------|------|------|
 | `/api/tags` | GET | 获取本地模型列表 |
 | `/api/version` | GET | 获取服务器版本 |
-| `/api/pull` | POST | 拉取模型（流式） |
-| `/v1/models` | GET | OpenAI 兼容模式健康检查 |
+| `/api/pull` | POST | 拉取模型（流式响应） |
 
-### 3.4 URL 处理逻辑
+#### OpenAI 兼容 API
 
-```rust
-// url.rs
-pub(crate) fn is_openai_compatible_base_url(base_url: &str) -> bool {
-    base_url.trim_end_matches('/').ends_with("/v1")
-}
+| 端点 | 方法 | 用途 |
+|------|------|------|
+| `/v1/models` | GET | 健康检查（OpenAI 兼容模式） |
 
-pub fn base_url_to_host_root(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/v1") {
-        trimmed.trim_end_matches("/v1").trim_end_matches('/').to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-```
+#### 版本兼容性
 
-**示例**：
-- `http://localhost:11434/v1` → `http://localhost:11434`（OpenAI 兼容模式）
-- `http://localhost:11434` → `http://localhost:11434`（原生模式）
+- **最低支持版本**: 0.13.4（支持 Responses API）
+- **开发版本**: 0.0.0（跳过版本检查）
+- **版本解析**: 支持 `v` 前缀（如 `v0.14.1`）
 
 ---
 
-## 4. 关键代码路径与文件引用
+## 关键代码路径与文件引用
 
-### 4.1 源文件清单
+### 文件结构
 
-| 文件 | 行数 | 职责 |
-|------|------|------|
-| `lib.rs` | 97 | 模块导出、高阶 API、版本检查 |
-| `client.rs` | 411 | OllamaClient 实现、HTTP 通信、流式解析 |
-| `pull.rs` | 147 | 拉取事件定义、进度报告器实现 |
-| `parser.rs` | 75 | JSON 事件解析器 |
-| `url.rs` | 39 | URL 处理工具函数 |
+```
+codex-rs/ollama/
+├── Cargo.toml           # 包配置（依赖: reqwest, semver, async-stream, bytes, futures）
+├── BUILD.bazel          # Bazel 构建配置
+└── src/
+    ├── lib.rs           # 库入口，导出公共 API
+    ├── client.rs        # OllamaClient 实现（~411 行）
+    ├── pull.rs          # 进度报告 trait 和实现（~147 行）
+    ├── parser.rs        # JSON 事件解析（~75 行）
+    └── url.rs           # URL 处理工具（~39 行）
+```
 
-### 4.2 关键函数引用
+### 关键代码路径
 
-| 函数 | 位置 | 用途 |
-|------|------|------|
-| `ensure_oss_ready` | `lib.rs:22` | 主入口：准备 OSS 环境 |
-| `ensure_responses_supported` | `lib.rs:62` | 版本兼容性检查 |
-| `OllamaClient::try_from_oss_provider` | `client.rs:31` | 从配置创建客户端 |
-| `OllamaClient::fetch_models` | `client.rs:101` | 获取模型列表 |
-| `OllamaClient::fetch_version` | `client.rs:127` | 获取版本信息 |
-| `OllamaClient::pull_model_stream` | `client.rs:154` | 流式拉取模型 |
-| `OllamaClient::pull_with_reporter` | `client.rs:212` | 带进度报告的拉取 |
-| `pull_events_from_value` | `parser.rs:6` | 解析 JSON 事件 |
+1. **服务器连接验证**
+   - `client.rs:31-46` - `try_from_oss_provider()`
+   - `client.rs:56-75` - `try_from_provider()`
+   - `client.rs:78-98` - `probe_server()`
 
-### 4.3 测试覆盖
+2. **模型查询**
+   - `client.rs:101-124` - `fetch_models()`
+   - `client.rs:127-150` - `fetch_version()`
 
-| 测试 | 位置 | 说明 |
-|------|------|------|
-| `supports_responses_for_dev_zero` | `lib.rs:83` | 开发版本支持检查 |
-| `does_not_support_responses_before_cutoff` | `lib.rs:88` | 旧版本拒绝检查 |
-| `supports_responses_at_or_after_cutoff` | `lib.rs:93` | 新版本支持检查 |
-| `test_fetch_models_happy_path` | `client.rs:267` | 模型获取测试 |
-| `test_fetch_version` | `client.rs:297` | 版本获取测试 |
-| `test_probe_server_happy_path_openai_compat_and_native` | `client.rs:334` | 服务器探测测试 |
-| `test_try_from_oss_provider_ok_when_server_running` | `client.rs:371` | 客户端创建成功测试 |
-| `test_try_from_oss_provider_err_when_server_missing` | `client.rs:394` | 客户端创建失败测试 |
-| `test_pull_events_decoder_status_and_success` | `parser.rs:38` | 事件解析测试 |
-| `test_pull_events_decoder_progress` | `parser.rs:50` | 进度解析测试 |
-| `test_base_url_to_host_root` | `url.rs:25` | URL 转换测试 |
+3. **模型拉取**
+   - `client.rs:154-209` - `pull_model_stream()`
+   - `client.rs:212-243` - `pull_with_reporter()`
+   - `parser.rs:6-29` - `pull_events_from_value()`
+
+4. **进度报告**
+   - `pull.rs:6-21` - `PullEvent` 定义
+   - `pull.rs:25-27` - `PullProgressReporter` trait
+   - `pull.rs:30-136` - `CliProgressReporter` 实现
+   - `pull.rs:140-147` - `TuiProgressReporter` 实现
+
+5. **URL 处理**
+   - `url.rs:2-4` - `is_openai_compatible_base_url()`
+   - `url.rs:7-18` - `base_url_to_host_root()`
+
+6. **高层 API**
+   - `lib.rs:22-49` - `ensure_oss_ready()`
+   - `lib.rs:62-76` - `ensure_responses_supported()`
+   - `lib.rs:51-57` - 版本检查辅助函数
 
 ---
 
-## 5. 依赖与外部交互
+## 依赖与外部交互
 
-### 5.1 Cargo 依赖
-
-```toml
-[dependencies]
-async-stream = { workspace = true }      # 异步流生成
-bytes = { workspace = true }             # 字节缓冲区
-codex-core = { workspace = true }        # 核心类型（Config, ModelProviderInfo）
-futures = { workspace = true }           # 异步 trait
-reqwest = { workspace = true, features = ["json", "stream"] }  # HTTP 客户端
-semver = { workspace = true }            # 语义版本解析
-serde_json = { workspace = true }        # JSON 解析
-tokio = { workspace = true, ... }        # 异步运行时
-tracing = { workspace = true }           # 日志追踪
-wiremock = { workspace = true }          # HTTP 测试模拟
-```
-
-### 5.2 上游调用方
-
-| 调用方 | 调用点 | 用途 |
-|--------|--------|------|
-| `codex_utils_oss` | `utils/oss/src/lib.rs:28-31` | `ensure_oss_provider_ready()` 委托 |
-| `codex_exec` | `exec/src/lib.rs:517` | 启动时检查 OSS 准备状态 |
-| `codex_tui` | `tui/src/oss_selection.rs` | OSS 提供者选择 UI |
-
-### 5.3 下游依赖
+### 内部依赖
 
 | 依赖 | 用途 |
 |------|------|
-| `codex_core::OLLAMA_OSS_PROVIDER_ID` | 提供者标识符常量（"ollama"） |
-| `codex_core::ModelProviderInfo` | 提供者配置结构体 |
-| `codex_core::Config` | 应用配置 |
-| `codex_core::create_oss_provider_with_base_url` | 测试用提供者构造 |
+| `codex-core` | `ModelProviderInfo`, `Config`, `OLLAMA_OSS_PROVIDER_ID` |
+| `codex-utils-oss` | 调用 `ensure_oss_ready()` 和 `DEFAULT_OSS_MODEL` |
 
-### 5.4 环境变量
+### 外部依赖
 
-| 变量 | 用途 | 定义位置 |
-|------|------|---------|
-| `CODEX_OSS_PORT` | 覆盖默认端口（11434） | `core/src/model_provider_info.rs:320` |
-| `CODEX_OSS_BASE_URL` | 覆盖完整 base URL | `core/src/model_provider_info.rs:327` |
-| `CODEX_SANDBOX_NETWORK_DISABLED` | 测试时禁用网络 | 测试跳过检查 |
-
----
-
-## 6. 风险、边界与改进建议
-
-### 6.1 已知风险
-
-| 风险 | 严重程度 | 说明 |
-|------|---------|------|
-| **错误处理盲区** | 中 | `fetch_models` 失败时返回空列表而非错误（`client.rs:110`），可能掩盖连接问题 |
-| **版本检查宽松** | 低 | `ensure_responses_supported` 在无法获取版本时放行（`lib.rs:65`），可能导致运行时错误 |
-| **硬编码超时** | 低 | 连接超时固定为 5 秒（`client.rs:65`），在慢网络环境可能不足 |
-| **TUI 进度报告简化** | 低 | `TuiProgressReporter` 直接委托给 `CliProgressReporter`，未实现真正的 TUI 集成 |
-
-### 6.2 边界条件
-
-| 场景 | 行为 |
+| 依赖 | 用途 |
 |------|------|
-| Ollama 服务器未运行 | 返回友好错误消息，提示启动命令 |
-| 模型已存在 | `ensure_oss_ready` 跳过拉取，直接返回 |
-| 拉取过程中断 | 流结束但无 Success 事件，返回错误 |
-| Ollama 返回 200 但包含错误 | 检查流中的 `error` 字段（`client.rs:190-193`） |
-| 空 base_url | 通过 `expect` 触发 panic（仅配置错误时发生） |
+| `reqwest` | HTTP 客户端，支持 JSON 和流式响应 |
+| `semver` | 语义版本解析和比较 |
+| `async-stream` | 异步流生成器（`stream!` 宏）|
+| `bytes` | 字节缓冲区管理（`BytesMut`）|
+| `futures` | 流处理工具（`StreamExt`, `BoxStream`）|
+| `serde_json` | JSON 解析 |
+| `tokio` | 异步运行时 |
+| `tracing` | 日志记录 |
+| `wiremock` | 测试中的 HTTP mock |
 
-### 6.3 改进建议
+### 调用方
 
-#### 6.3.1 短期改进
+| 调用方 | 调用方式 | 用途 |
+|--------|----------|------|
+| `codex-utils-oss` | `ensure_oss_ready()`, `DEFAULT_OSS_MODEL` | OSS 提供者统一接口 |
+| `codex-tui` | `--oss` 标志处理 | TUI 模式下使用本地模型 |
+| `codex-exec` | `--oss` 标志处理 | Exec 模式下使用本地模型 |
 
-1. **增强错误上下文**
-   ```rust
-   // 当前：直接返回空列表
-   if !resp.status().is_success() {
-       return Ok(Vec::new());
-   }
-   // 建议：记录警告或返回具体错误
-   ```
+### 配置集成
 
-2. **可配置超时**
-   ```rust
-   // 从 Config 读取超时设置
-   .connect_timeout(config.ollama_connect_timeout)
-   ```
+通过 `Config::model_providers` 获取 Ollama 提供者配置：
 
-3. **TUI 原生进度报告**
-   - 实现真正的 TUI 进度条，而非委托给 CLI 实现
-   - 支持 ratatui 的 `Gauge` 组件
+```rust
+let provider = config.model_providers.get(OLLAMA_OSS_PROVIDER_ID)?;
+```
 
-#### 6.3.2 中期改进
-
-1. **模型缓存管理**
-   - 添加 `list_local_models()` 缓存机制
-   - 支持模型版本检查和更新提示
-
-2. **并发拉取优化**
-   - 当前单线程流式处理，可考虑并发下载多个层
-
-3. **健康检查增强**
-   - 支持重试机制
-   - 检测服务器启动中状态（优雅等待）
-
-#### 6.3.3 长期改进
-
-1. **统一 OSS 提供者抽象**
-   - 当前 `codex_lmstudio` 和 `codex_ollama` 有重复代码
-   - 考虑提取 `codex_oss_provider` trait
-
-2. **异步模型预热**
-   - 启动时后台预拉取常用模型
-   - 配置化预热策略
+支持的环境变量：
+- `CODEX_OSS_PORT` - 覆盖默认端口（11434）
+- `CODEX_OSS_BASE_URL` - 覆盖完整基础 URL
 
 ---
 
-## 7. 附录
+## 风险、边界与改进建议
 
-### 7.1 代码统计
+### 已知风险
 
-```
-Language: Rust
-Files: 5
-Total Lines: 769
-- lib.rs: 97
-- client.rs: 411
-- pull.rs: 147
-- parser.rs: 75
-- url.rs: 39
-```
+1. **版本兼容性**
+   - Ollama < 0.13.4 不支持 Responses API，会返回明确的错误消息
+   - 开发版本（0.0.0）跳过版本检查，可能导致运行时错误
 
-### 7.2 相关文档
+2. **网络超时**
+   - 连接超时硬编码为 5 秒，在慢速网络环境下可能不足
+   - 拉取大模型时无整体超时控制，可能无限期挂起
 
-- [Ollama API 文档](https://github.com/ollama/ollama/blob/main/docs/api.md)
-- [OpenAI API 兼容说明](https://github.com/ollama/ollama/blob/main/docs/openai.md)
-- Codex 配置文档：`docs/` 目录下的 provider 配置说明
+3. **错误处理**
+   - `fetch_models()` 失败时仅记录警告，不阻止后续操作
+   - Ollama 可能在 HTTP 200 响应中返回错误，需要通过流解析检测
 
-### 7.3 调试技巧
+4. **并发安全**
+   - `CliProgressReporter` 使用 `std::io::stderr()`，在多线程环境下输出可能交错
 
-```bash
-# 测试 Ollama 连接
-curl http://localhost:11434/api/tags
+### 边界情况
 
-# 测试模型拉取（流式）
-curl -X POST http://localhost:11434/api/pull \
-  -d '{"model": "gpt-oss:20b", "stream": true}'
+1. **模型名称匹配**
+   - 使用简单字符串比较，不支持通配符或版本标签匹配
+   - 模型标签（如 `:latest`）必须完全匹配
 
-# 检查版本
-curl http://localhost:11434/api/version
-```
+2. **进度计算**
+   - 依赖 Ollama 返回的 `total` 和 `completed` 字段，某些层可能缺少这些信息
+   - 多 digest 进度聚合使用 `HashMap`，内存占用随层数线性增长
+
+3. **URL 处理**
+   - 仅支持 `/v1` 后缀检测，其他 OpenAI 兼容路径可能无法识别
+   - 尾部斜杠处理依赖 `trim_end_matches('/')`，可能不适用于所有 URL 格式
+
+### 改进建议
+
+1. **可配置超时**
+   ```rust
+   // 建议：从配置读取超时值
+   pub async fn try_from_provider_with_timeout(
+       provider: &ModelProviderInfo,
+       timeout: Duration,
+   ) -> io::Result<Self>
+   ```
+
+2. **更健壮的版本检查**
+   - 添加 Responses API 功能探测（尝试调用测试端点）
+   - 提供自动升级提示
+
+3. **进度报告增强**
+   - 添加 ETA 估计
+   - 支持暂停/恢复拉取
+   - TUI 专用进度组件（当前委托给 CLI 实现）
+
+4. **错误分类**
+   - 区分网络错误、磁盘空间不足、模型不存在等具体错误类型
+   - 提供针对性的用户指导
+
+5. **并发拉取优化**
+   - 支持多 digest 并行下载（如果 Ollama 支持）
+   - 添加下载速度限制选项
+
+6. **测试覆盖**
+   - 当前测试依赖 `wiremock`，建议添加：
+     - 集成测试（使用真实 Ollama 实例，可选）
+     - 错误场景测试（网络中断、磁盘满等）
+     - 大模型拉取的压力测试
 
 ---
 
-*文档生成时间：2026-03-21*
-*研究范围：codex-rs/ollama/src/*
+## 测试
+
+### 单元测试
+
+位于各文件的 `#[cfg(test)]` 模块：
+
+- `lib.rs:78-97` - 版本检查逻辑测试
+- `client.rs:260-411` - HTTP 客户端测试（使用 wiremock）
+- `parser.rs:31-75` - JSON 解析测试
+- `url.rs:20-39` - URL 转换测试
+
+### 测试注意事项
+
+- 所有网络测试检查 `CODEX_SANDBOX_NETWORK_DISABLED` 环境变量
+- 使用 `wiremock::MockServer` 模拟 Ollama API 响应
+- 测试覆盖正常路径和错误路径（服务器不可达）
+
+---
+
+## 总结
+
+`codex-rs/ollama/src` 是一个设计简洁、职责明确的模块，成功将 Ollama 本地模型提供者集成到 Codex CLI 中。其核心设计亮点包括：
+
+1. **清晰的抽象分层** - 底层 HTTP 客户端、中层流处理、高层便利 API
+2. **灵活的进度报告** - trait 抽象支持 CLI 和 TUI 不同渲染需求
+3. **协议兼容性** - 同时支持 Ollama 原生 API 和 OpenAI 兼容端点
+4. **健壮的错误处理** - 区分致命错误和非致命警告，提供有用的错误消息
+
+该模块是 Codex 支持本地 AI 模型的关键基础设施，代码质量高，测试覆盖良好，但仍有提升空间（特别是可配置性和 TUI 体验方面）。
