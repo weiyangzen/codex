@@ -1,0 +1,583 @@
+# third_party/meriyah 研究文档
+
+## 场景与职责
+
+`third_party/meriyah` 目录用于存放 Meriyah JavaScript 解析器的第三方依赖许可文件。Meriyah 是一个高性能的 JavaScript/ECMAScript 解析器，被 Codex 项目的 `js_repl` 工具用于在 Node.js 环境中解析和执行 JavaScript 代码。
+
+### 在项目中的定位
+
+- **位置**: `third_party/meriyah/`
+- **用途**: 存放 Meriyah 解析器的 ISC 许可证文件
+- **实际代码位置**: `codex-rs/core/src/tools/js_repl/meriyah.umd.min.js`
+- **引入版本**: Meriyah v7.0.0
+
+### 为什么需要 Meriyah
+
+Codex 的 `js_repl` 工具提供了一个持久的 JavaScript REPL 环境，允许 AI 代理在 Node.js 虚拟机中执行 JavaScript 代码。为了实现以下功能，需要一个可靠的 JavaScript 解析器：
+
+1. **代码解析**: 解析用户输入的 JavaScript 代码，生成 AST（抽象语法树）
+2. **变量绑定追踪**: 分析代码中的变量声明（`const`, `let`, `var`, `function`, `class`）
+3. **代码插桩**: 在代码中插入标记，用于追踪变量赋值和函数调用
+4. **跨 cell 状态持久化**: 实现 REPL 中变量绑定在多次执行间的持久化
+
+---
+
+## 功能点目的
+
+### 1. JavaScript 代码解析
+
+Meriyah 提供了 `parseModule()` 方法，用于将 JavaScript 源代码解析为 ESTree 兼容的 AST。
+
+```javascript
+const ast = meriyah.parseModule(code, {
+  next: true,        // 支持 ES2020+ 特性
+  module: true,      // 解析为 ES 模块
+  ranges: true,      // 包含节点位置范围信息
+  loc: false,        // 不包含行号/列号信息
+  disableWebCompat: true,  // 禁用 Web 兼容性模式
+});
+```
+
+### 2. 变量绑定收集
+
+通过遍历 AST，`js_repl` 能够收集代码中的变量绑定信息：
+
+- **支持的绑定类型**: `const`, `let`, `var`, `function`, `class`
+- **解构模式支持**: 对象解构、数组解构、嵌套解构
+- **循环变量追踪**: `for` 循环中的 `var` 声明
+
+### 3. 代码插桩（Instrumentation）
+
+`js_repl` 使用 Meriyah 解析后的 AST 进行代码插桩，实现以下功能：
+
+- **变量赋值追踪**: 在变量声明处插入标记，记录哪些变量已被成功初始化
+- **提升变量（Hoisted Variables）处理**: 追踪 `var` 和 `function` 声明的提升行为
+- **失败 Cell 恢复**: 当代码执行失败时，保留已成功初始化的变量绑定
+
+### 4. 跨 Cell 状态管理
+
+Meriyah 解析的 AST 使得 `js_repl` 能够：
+
+- 构建 synthetic module 来桥接不同 cell 之间的变量绑定
+- 通过 `@prev` 虚拟模块导入前一次执行的绑定
+- 实现类似原生 REPL 的变量持久化体验
+
+---
+
+## 具体技术实现
+
+### 关键数据结构
+
+#### 1. AST 节点类型（ESTree 规范）
+
+```javascript
+// 变量声明节点
+{
+  type: "VariableDeclaration",
+  kind: "const" | "let" | "var",
+  declarations: [...]
+}
+
+// 函数声明节点
+{
+  type: "FunctionDeclaration",
+  id: { type: "Identifier", name: "functionName" }
+}
+
+// 类声明节点
+{
+  type: "ClassDeclaration",
+  id: { type: "Identifier", name: "ClassName" }
+}
+```
+
+#### 2. 绑定数据结构
+
+```javascript
+// Binding 类型定义
+{
+  name: string,           // 变量名
+  kind: "const" | "let" | "var" | "function" | "class"
+}
+```
+
+### 关键流程
+
+#### 代码构建流程（`buildModuleSource`）
+
+```javascript
+async function buildModuleSource(code) {
+  // 1. 解析原始代码
+  const ast = meriyah.parseModule(code, { ... });
+  
+  // 2. 收集当前代码的变量绑定
+  const currentBindings = collectBindings(ast);
+  
+  // 3. 获取之前的绑定（用于跨 cell 持久化）
+  const priorBindings = previousModule ? previousBindings : [];
+  
+  // 4. 生成辅助声明和标记函数名
+  const helperDeclarations = [];
+  const markCommittedFnName = nextInternalBindingName();
+  
+  // 5. 处理未来 var 写操作（提升变量）
+  const writeInstrumentedCode = applyReplacements(
+    code,
+    collectFutureVarWriteReplacements(code, ast, { ... })
+  );
+  
+  // 6. 重新解析插桩后的代码
+  const instrumentedAst = meriyah.parseModule(writeInstrumentedCode, { ... });
+  
+  // 7. 对当前绑定进行插桩
+  const instrumentedCode = instrumentCurrentBindings(...);
+  
+  // 8. 构建 prelude（导入之前的绑定）
+  let prelude = "";
+  if (previousModule && priorBindings.length) {
+    prelude += 'import * as __prev from "@prev";\n';
+    prelude += priorBindings.map(b => {
+      const keyword = b.kind === "var" ? "var" : b.kind === "const" ? "const" : "let";
+      return `${keyword} ${b.name} = __prev.${b.name};`;
+    }).join("\n");
+  }
+  
+  // 9. 构建导出语句
+  const exportStmt = exportNames.length
+    ? `\nexport { ${exportNames.join(", ")} };`
+    : "";
+  
+  // 10. 返回完整的模块源代码
+  return {
+    source: `${prelude}${instrumentedCode}${exportStmt}`,
+    currentBindings,
+    nextBindings,
+    priorBindings,
+  };
+}
+```
+
+#### 变量绑定收集（`collectBindings`）
+
+```javascript
+function collectBindings(ast) {
+  const map = new Map();
+  for (const stmt of ast.body ?? []) {
+    switch (stmt.type) {
+      case "VariableDeclaration":
+        // 处理 const/let/var 声明
+        for (const decl of stmt.declarations) {
+          collectPatternNames(decl.id, stmt.kind, map);
+        }
+        break;
+      case "FunctionDeclaration":
+        if (stmt.id) map.set(stmt.id.name, "function");
+        break;
+      case "ClassDeclaration":
+        if (stmt.id) map.set(stmt.id.name, "class");
+        break;
+      // 处理 for 循环中的 var 声明...
+    }
+  }
+  return Array.from(map.entries()).map(([name, kind]) => ({ name, kind }));
+}
+```
+
+#### 模式名称收集（支持解构）
+
+```javascript
+function collectPatternNames(pattern, kind, map) {
+  switch (pattern.type) {
+    case "Identifier":
+      map.set(pattern.name, kind);
+      break;
+    case "ObjectPattern":
+      // 递归处理对象解构
+      for (const prop of pattern.properties ?? []) {
+        if (prop.type === "Property") {
+          collectPatternNames(prop.value, kind, map);
+        } else if (prop.type === "RestElement") {
+          collectPatternNames(prop.argument, kind, map);
+        }
+      }
+      break;
+    case "ArrayPattern":
+      // 递归处理数组解构
+      for (const elem of pattern.elements ?? []) {
+        if (elem?.type === "RestElement") {
+          collectPatternNames(elem.argument, kind, map);
+        } else if (elem) {
+          collectPatternNames(elem, kind, map);
+        }
+      }
+      break;
+    case "AssignmentPattern":
+      // 处理默认值
+      collectPatternNames(pattern.left, kind, map);
+      break;
+    // ...
+  }
+}
+```
+
+### 代码插桩策略
+
+#### 1. 变量声明插桩
+
+对于每个变量声明，在声明后插入标记调用：
+
+```javascript
+// 原始代码
+const x = 1, y = 2;
+
+// 插桩后
+const x = 1, __codex_internal_0 = markCommitted("x"), 
+      y = 2, __codex_internal_1 = markCommitted("y");
+```
+
+#### 2. 函数/类声明插桩
+
+```javascript
+// 原始代码
+function foo() {}
+class Bar {}
+
+// 插桩后
+function foo() {}
+;markCommitted("foo");
+class Bar {}
+;markCommitted("Bar");
+```
+
+#### 3. 提升变量写操作插桩
+
+对于在声明前使用的 `var` 变量，追踪其写操作：
+
+```javascript
+// 原始代码
+x = 1;  // 在 var x 之前赋值
+var x;
+
+// 插桩后
+(x = 1, markCommitted("x"), x);  // 包装为表达式
+var x;
+```
+
+#### 4. 循环变量插桩
+
+对于 `for...in` / `for...of` 循环中的 `var` 声明：
+
+```javascript
+// 原始代码
+for (var x of iterable) { ... }
+
+// 插桩后
+let __guard = true;
+for (var x of iterable) {
+  if (__guard) { __guard = false; markCommitted("x"); }
+  ...
+}
+```
+
+### 协议/通信机制
+
+`js_repl` 使用 JSON Lines 协议在 Rust 宿主和 Node.js 内核之间通信：
+
+#### 宿主到内核的消息类型
+
+```rust
+enum HostToKernel {
+    Exec {
+        id: String,
+        code: String,
+        timeout_ms: Option<u64>,
+    },
+    RunToolResult(RunToolResult),
+    EmitImageResult(EmitImageResult),
+}
+```
+
+#### 内核到宿主的消息类型
+
+```rust
+enum KernelToHost {
+    ExecResult {
+        id: String,
+        ok: bool,
+        output: String,
+        error: Option<String>,
+    },
+    RunTool(RunToolRequest),
+    EmitImage(EmitImageRequest),
+}
+```
+
+---
+
+## 关键代码路径与文件引用
+
+### 核心文件
+
+| 文件路径 | 描述 |
+|---------|------|
+| `third_party/meriyah/LICENSE` | Meriyah 的 ISC 许可证 |
+| `codex-rs/core/src/tools/js_repl/meriyah.umd.min.js` | Meriyah v7.0.0 UMD 构建文件（133KB） |
+| `codex-rs/core/src/tools/js_repl/kernel.js` | Node.js 内核，使用 Meriyah 进行代码解析和插桩 |
+| `codex-rs/core/src/tools/js_repl/mod.rs` | Rust 模块，管理内核生命周期和通信 |
+
+### 代码引用路径
+
+#### 1. Meriyah 导入（`kernel.js:19-21`）
+
+```javascript
+const meriyahPromise = import("./meriyah.umd.min.js").then(
+  (m) => m.default ?? m,
+);
+```
+
+#### 2. 代码解析调用（`kernel.js:960-967`）
+
+```javascript
+const meriyah = await meriyahPromise;
+const ast = meriyah.parseModule(code, {
+  next: true,
+  module: true,
+  ranges: true,
+  loc: false,
+  disableWebCompat: true,
+});
+```
+
+#### 3. 重新解析插桩代码（`kernel.js:991-997`）
+
+```javascript
+const instrumentedAst = meriyah.parseModule(writeInstrumentedCode, {
+  next: true,
+  module: true,
+  ranges: true,
+  loc: false,
+  disableWebCompat: true,
+});
+```
+
+#### 4. Rust 端嵌入（`mod.rs:51-52`）
+
+```rust
+const KERNEL_SOURCE: &str = include_str!("kernel.js");
+const MERIYAH_UMD: &str = include_str!("meriyah.umd.min.js");
+```
+
+#### 5. 内核脚本写入（`mod.rs:1158-1165`）
+
+```rust
+async fn write_kernel_script(&self) -> Result<PathBuf, std::io::Error> {
+    let dir = self.tmp_dir.path();
+    let kernel_path = dir.join("js_repl_kernel.js");
+    let meriyah_path = dir.join("meriyah.umd.min.js");
+    tokio::fs::write(&kernel_path, KERNEL_SOURCE).await?;
+    tokio::fs::write(&meriyah_path, MERIYAH_UMD).await?;
+    Ok(kernel_path)
+}
+```
+
+### 相关工具处理文件
+
+| 文件路径 | 描述 |
+|---------|------|
+| `codex-rs/core/src/tools/handlers/js_repl.rs` | `js_repl` 工具处理器实现 |
+| `codex-rs/core/src/tools/js_repl/mod_tests.rs` | 单元测试和集成测试 |
+| `docs/js_repl.md` | 用户文档 |
+
+---
+
+## 依赖与外部交互
+
+### 直接依赖
+
+1. **Meriyah v7.0.0** (npm 包)
+   - 来源: `npm pack meriyah@7.0.0`
+   - 文件: `dist/meriyah.umd.min.js`
+   - 许可证: ISC
+
+2. **Node.js 运行时**
+   - 最低版本要求: 定义在 `codex-rs/node-version.txt`
+   - 需要 `--experimental-vm-modules` 标志
+   - 使用 `vm.SourceTextModule` 和 `vm.SyntheticModule`
+
+### 与 Rust 代码的交互
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Rust 宿主层                          │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  JsReplManager (mod.rs)                             │   │
+│  │  - 管理内核进程生命周期                              │   │
+│  │  - 处理 JSON Lines 通信                              │   │
+│  │  - 工具调用路由                                      │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                         │                                   │
+│                         ▼ stdin/stdout (JSON Lines)        │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  Node.js 内核进程 (kernel.js)                        │   │
+│  │  - 使用 Meriyah 解析 JS 代码                         │   │
+│  │  - 代码插桩和变量追踪                                │   │
+│  │  - VM 模块执行                                       │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 环境变量
+
+| 变量名 | 描述 |
+|-------|------|
+| `CODEX_JS_REPL_NODE_PATH` | 指定 Node.js 可执行文件路径 |
+| `CODEX_JS_REPL_NODE_MODULE_DIRS` | 模块搜索路径（PATH 分隔） |
+| `CODEX_JS_TMP_DIR` | 临时目录路径 |
+| `CODEX_THREAD_ID` | 线程 ID（用于内部绑定名盐值） |
+
+### 配置选项
+
+```toml
+[features]
+js_repl = true  # 启用 js_repl 功能
+
+# 可选配置
+js_repl_node_path = "/absolute/path/to/node"
+js_repl_node_module_dirs = ["/path/to/node_modules"]
+```
+
+---
+
+## 风险、边界与改进建议
+
+### 已知风险
+
+#### 1. 版本兼容性风险
+
+- **Node.js 版本**: 需要较新的 Node.js 版本支持 `--experimental-vm-modules`
+- **Meriyah 版本**: 当前锁定在 v7.0.0，升级可能需要测试解析行为变化
+
+#### 2. 安全风险
+
+- **代码执行**: `js_repl` 执行任意 JavaScript 代码，依赖 Node.js VM 沙箱
+- **模块导入**: 允许导入 Node.js 内置模块和 npm 包，但有黑名单限制：
+  - `process`, `node:process`
+  - `child_process`, `node:child_process`
+  - `worker_threads`, `node:worker_threads`
+
+#### 3. 性能风险
+
+- **双重解析**: 每次执行需要两次 Meriyah 解析（原始代码 + 插桩后代码）
+- **AST 遍历**: 复杂的绑定收集涉及多次 AST 遍历
+
+### 边界限制
+
+#### 1. 语法支持边界
+
+| 特性 | 支持状态 | 说明 |
+|-----|---------|------|
+| ES2020+ | ✅ 支持 | 通过 `next: true` 启用 |
+| 顶层静态导入 | ❌ 不支持 | 必须使用 `await import()` |
+| 动态导入 | ✅ 支持 | 完全支持 |
+| TypeScript | ❌ 不支持 | 仅支持纯 JavaScript |
+| JSX | ❌ 不支持 | 未启用相关解析选项 |
+
+#### 2. 变量提升处理边界
+
+**支持的失败 Cell 恢复场景**:
+- 直接顶层标识符写操作: `x = 1`, `x += 1`, `x++`
+- 逻辑赋值: `x &&= 1`, `x ||= 1`, `x ??= 1`
+- 非空顶层 `for...in` / `for...of` 循环
+
+**不支持的失败 Cell 恢复场景**:
+- 声明前读取提升的函数值
+- 嵌套块中的写操作
+- 解构赋值恢复
+- 空循环体中的 `var` 声明
+
+#### 3. 模块解析边界
+
+- 仅支持 `.js` 和 `.mjs` 文件
+- 不支持目录导入
+- 本地文件模块在每次执行时重新加载
+
+### 改进建议
+
+#### 1. 性能优化
+
+```javascript
+// 当前: 双重解析
+const ast = meriyah.parseModule(code, {...});
+// ... 插桩 ...
+const instrumentedAst = meriyah.parseModule(writeInstrumentedCode, {...});
+
+// 建议: 考虑使用 AST 转换直接修改，避免重新解析
+// 或使用 Meriyah 的增量解析功能（如果支持）
+```
+
+#### 2. 错误处理增强
+
+- 添加更详细的解析错误信息
+- 提供 AST 验证步骤，在代码执行前捕获潜在问题
+
+#### 3. 功能扩展
+
+- **TypeScript 支持**: 考虑集成 TypeScript 解析器或转译步骤
+- **Source Map**: 为插桩代码生成 source map，改善调试体验
+- **缓存机制**: 缓存解析后的 AST，避免重复解析相同代码
+
+#### 4. 安全加固
+
+```javascript
+// 建议添加更多内置模块限制
+const deniedBuiltinModules = new Set([
+  "process", "node:process",
+  "child_process", "node:child_process",
+  "worker_threads", "node:worker_threads",
+  // 建议添加:
+  "cluster", "node:cluster",
+  "v8", "node:v8",
+  "inspector", "node:inspector",
+]);
+```
+
+#### 5. 监控和可观测性
+
+- 添加 Meriyah 解析时间指标
+- 监控 AST 节点数量，防止过大代码导致内存问题
+- 记录插桩前后的代码大小变化
+
+#### 6. 版本管理
+
+- 建立 Meriyah 升级测试套件
+- 考虑使用 npm 的 lockfile 机制管理依赖
+- 添加自动化测试验证解析器行为
+
+### 维护检查清单
+
+当更新 Meriyah 时，需要：
+
+1. ✅ 替换 `meriyah.umd.min.js` 文件
+2. ✅ 更新 `third_party/meriyah/LICENSE` 文件
+3. ✅ 更新文件头部的版本注释
+4. ✅ 更新 `NOTICE` 文件（如版权声明变化）
+5. ✅ 运行 `js_repl` 相关测试
+6. ✅ 验证解析选项兼容性（`next`, `module`, `ranges` 等）
+
+---
+
+## 附录：Meriyah 解析选项说明
+
+| 选项 | 值 | 说明 |
+|-----|---|------|
+| `next` | `true` | 支持 ES2020+ 特性（BigInt、可选链等） |
+| `module` | `true` | 解析为 ES 模块（支持 `import`/`export`） |
+| `ranges` | `true` | 在 AST 节点中包含 `start` 和 `end` 位置 |
+| `loc` | `false` | 不包含行号/列号信息（减少内存占用） |
+| `disableWebCompat` | `true` | 禁用 Web 浏览器兼容性模式 |
+
+这些选项的选择是为了：
+- 支持现代 JavaScript 语法
+- 提供足够的位置信息用于代码插桩
+- 最小化 AST 大小和解析开销
+- 避免浏览器特定的语法扩展
