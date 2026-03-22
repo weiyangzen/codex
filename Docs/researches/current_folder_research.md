@@ -16,13 +16,13 @@
 - 产品矩阵包括：
   - **Codex CLI**: 本地运行的编码代理（主要入口）
   - **IDE 扩展**: VS Code、Cursor、Windsurf 等
-  - **桌面应用**: `codex app` 命令启动
+  - **桌面应用**: `codex app` 命令启动（macOS 专属）
   - **云端代理**: Codex Web（chatgpt.com/codex）
 
 ### 2. 多技术栈聚合
 
-- **Rust 主实现**位于 `codex-rs/`，是一个大型 workspace，包含 60+ crate（`codex-rs/Cargo.toml:1-157`）。
-- **Node/PNPM 工作区**承载 npm 分发封装、TypeScript SDK、shell-tool-mcp（`pnpm-workspace.yaml:1-12`）。
+- **Rust 主实现**位于 `codex-rs/`，是一个大型 workspace，包含 74 个 crate（`codex-rs/Cargo.toml:1-74`）。
+- **Node/PNPM 工作区**承载 npm 分发封装、TypeScript SDK、shell-tool-mcp（`pnpm-workspace.yaml:1-5`）。
 - 根 `package.json` 负责仓库级格式化与辅助脚本，而非业务主逻辑（`package.json:2-25`）。
 
 ### 3. 构建与发布控制面
@@ -34,7 +34,7 @@
 ### 4. 文档与运维自动化承接层
 
 - `docs/` 提供安装、贡献、配置等入口（`docs/install.md:1-64`，`docs/contributing.md:1-97`）。
-- `.ops/` 脚本维护研究 checklist/todo 与自动任务分发（`.ops/generate_research_blueprint_checklist.sh:1-73`，`.ops/generate_daily_research_todo.sh:1-42`，`.ops/research_guard.sh:131-205`）。
+- `.ops/` 脚本维护研究 checklist/todo 与自动任务分发（`.ops/generate_research_blueprint_checklist.sh`，`.ops/generate_daily_research_todo.sh`，`.ops/research_guard.sh:131-205`）。
 
 ---
 
@@ -46,6 +46,13 @@
 
 - `@openai/codex` 的 JS 入口仅负责平台探测与二进制转发，业务逻辑在 Rust 二进制中（`codex-cli/bin/codex.js:15-229`，`codex-cli/package.json:2-22`）。
 - 支持的平台包括：Linux x64/arm64、macOS x64/arm64、Windows x64/arm64。
+- 平台包映射关系定义在 `codex-cli/bin/codex.js:15-22`：
+  - `x86_64-unknown-linux-musl` → `@openai/codex-linux-x64`
+  - `aarch64-unknown-linux-musl` → `@openai/codex-linux-arm64`
+  - `x86_64-apple-darwin` → `@openai/codex-darwin-x64`
+  - `aarch64-apple-darwin` → `@openai/codex-darwin-arm64`
+  - `x86_64-pc-windows-msvc` → `@openai/codex-win32-x64`
+  - `aarch64-pc-windows-msvc` → `@openai/codex-win32-arm64`
 
 ### 2. 将"交互模式"与"执行模式"统一在一个 CLI 门面
 
@@ -55,7 +62,7 @@
 ### 3. 将"协议层"与"业务层"分离
 
 - `codex-protocol` 约束为类型层，尽量避免业务逻辑（`codex-rs/protocol/README.md:1-5`）。
-- app-server 通过 JSON-RPC 双向协议提供线程/turn/item 抽象，承担 IDE/SDK 的稳定接口（`codex-rs/app-server/README.md:20-185`）。
+- app-server 通过 JSON-RPC 双向协议提供 thread/turn/item 抽象，承担 IDE/SDK 的稳定接口（`codex-rs/app-server/README.md:20-185`）。
 
 ### 4. 支持多消费端（CLI/IDE/SDK）共享同一核心能力
 
@@ -125,7 +132,18 @@
 
 **Rust workspace 结构：**
 
-- 60+ crate，覆盖 core/exec/tui/app-server/protocol/sandbox/connectors 等（`codex-rs/Cargo.toml:1-157`）。
+- 74 个 crate，覆盖 core/exec/tui/app-server/protocol/sandbox/connectors 等（`codex-rs/Cargo.toml:1-74`）。
+- 关键 crate 包括：
+  - `codex-core`: 核心代理逻辑、配置管理、特性标志
+  - `codex-cli`: 主 CLI 入口、子命令分派
+  - `codex-tui`: 交互式终端界面
+  - `codex-exec`: 非交互式执行模式
+  - `codex-app-server`: JSON-RPC 服务端（IDE/SDK 接口）
+  - `codex-app-server-protocol`: 协议类型定义、schema 生成
+  - `codex-protocol`: 底层协议类型
+  - `codex-mcp-server`: MCP 协议服务端
+  - `codex-sandbox-*`: 各平台沙箱实现
+  - `codex-state`: 会话状态持久化（SQLite）
 
 **JS/PNPM 结构：**
 
@@ -137,6 +155,7 @@
 - `ci.yml`：Node/PNPM 流程 + staging npm 包 + README 规则检查 + prettier（`.github/workflows/ci.yml:7-66`）。
 - `rust-ci.yml`：变更路径检测后按矩阵运行 format/lint/build/test/argument-comment-lint 等（`.github/workflows/rust-ci.yml:12-741`）。
 - `rust-release.yml`：tag 校验、跨平台构建、签名、打包发布（`.github/workflows/rust-release.yml:19-689`）。
+- 发布 tag 格式：`rust-v*.*.*`，需与 `codex-rs/Cargo.toml` 中的版本一致。
 
 **schema 一致性机制：**
 
@@ -154,7 +173,8 @@
 
 **守护执行：**
 
-- `research_guard.sh` 自动读取首个 pending 项，拼装中文任务模板并调用 `codex --yolo exec`（`.ops/research_guard.sh:140-250`）。
+- `research_guard.sh` 自动读取首个 pending 项，拼装中文任务模板并调用 `kimi --yolo exec`（`.ops/research_guard.sh:140-250`）。
+- 支持多 key 轮询（`KIMI_KEYS_FILE`），支持超时控制（`KIMI_EXEC_TIMEOUT_SECONDS`）。
 
 ---
 
@@ -242,10 +262,12 @@
 ### 2) 关键运行时依赖
 
 **Rust**：Cargo workspace + 多 crate 内部依赖（`codex-rs/Cargo.toml:86-157`）。
+- 关键外部依赖：tokio、axum、serde、sqlx、ratatui、crossterm、reqwest、clap 等。
 
 **JS**：Node + PNPM workspace（`package.json:21-25`，`pnpm-workspace.yaml:1-12`）。
 
 **Bazel**：rules_rs + llvm + platform toolchain（`MODULE.bazel:3-64`）。
+- 支持的平台 triples：`aarch64-unknown-linux-gnu/musl`、`aarch64-apple-darwin`、`x86_64-unknown-linux-gnu/musl`、`x86_64-apple-darwin`、Windows variants。
 
 ### 3) 配置面外部输入
 
@@ -257,6 +279,7 @@
 - `CODEX_SQLITE_HOME`：SQLite 状态数据库位置
 - `RUST_LOG`：日志级别控制
 - `OPENAI_API_KEY`：API 认证
+- `CODEX_SANDBOX` / `CODEX_SANDBOX_NETWORK_DISABLED`：沙箱控制
 
 **跨进程/系统能力**：
 
@@ -271,28 +294,37 @@
 #### 1. 多构建系统并存导致认知成本高
 
 - Cargo/Just/Bazel/PNPM/Nix/GitHub Actions 共存，排障路径容易分叉。
+- 不同构建系统间的依赖版本可能产生不一致。
 
 #### 2. 版本约束可能出现"根与子包不一致"
 
 - 根 Node>=22（`package.json:21-23`）与某些分发包 Node>=16（`codex-cli/package.json:9-11`）存在体验差异风险。
+- Rust 2024 edition 与特定工具链版本绑定。
 
 #### 3. 协议面持续扩展导致客户端兼容压力
 
 - app-server API 面非常广，新增字段/方法若没有严格 schema fixture 约束，易引入 SDK 破坏性变更。
+- v1/v2 API 并存增加了维护复杂度。
 
 #### 4. 安全边界依赖运行环境正确配置
 
 - proxy/mcp/sandbox 等组件对"特权用户、环境变量、系统工具可用性"有前置假设，不满足时可能退化为不可用或策略旁路。
+- Windows 沙箱支持相对较弱。
 
 #### 5. 自动化脚本的"全局 add/commit"风险
 
 - 研究守护和任务模板中存在 `git add -A` 模式，若工作区有非目标变更，可能误纳入提交（见 `.ops/research_guard.sh` 的 checkpoint 逻辑）。
+
+#### 6. 外部贡献限制
+
+- 根据 `docs/contributing.md:3-5`，目前仅接受邀请制的外部贡献，可能限制社区参与度。
 
 ### 边界
 
 1. **根目录主要是编排层，不是业务算法层**。具体 agent 推理/执行策略在 `codex-rs/core` 与相关 crate，而非根脚本本身。
 2. **文档中有大量跳转到官方站点**，仓库内文档偏"索引式"。
 3. **外部贡献受限**：根据 `docs/contributing.md`，目前仅接受邀请制的外部贡献。
+4. **WSL2 是 Windows 的主要支持方式**：原生 Windows 支持仍在发展中。
 
 ### 改进建议
 
@@ -303,6 +335,7 @@
 #### 2. 建议统一并显式化版本策略
 
 - 在根 README 或 `docs/install.md` 增加"开发时 Node 版本 vs 分发包运行时版本"的对照表。
+- 明确 Rust 工具链版本要求。
 
 #### 3. 建议为 `.ops` 自动提交增加白名单
 
@@ -324,6 +357,10 @@
 
 - 当前不同 crate 间的错误处理和日志格式存在差异，建议制定统一的错误码和日志结构化规范。
 
+#### 8. 建议增强 Windows 原生支持
+
+- 目前 Windows 主要通过 WSL2 支持，建议完善原生 Windows 沙箱和终端支持。
+
 ---
 
 ## 附录：核心 crate 职责速查
@@ -344,3 +381,32 @@
 | `codex-state` | 会话状态持久化（SQLite） |
 | `codex-connectors` | 外部服务连接器 |
 | `codex-skills` | 技能系统实现 |
+| `codex-backend-client` | 后端 API 客户端 |
+| `codex-file-search` | 文件搜索功能 |
+| `codex-apply-patch` | 补丁应用功能 |
+| `codex-login` | 认证登录流程 |
+| `codex-secrets` | 密钥管理 |
+| `codex-otel` | OpenTelemetry 可观测性 |
+
+---
+
+## 附录：目录结构速览
+
+```
+/home/sansha/Github/codex/
+├── codex-rs/           # Rust 主实现（74 crates）
+├── codex-cli/          # npm 分发包装
+├── sdk/                # TypeScript/Python SDK
+├── shell-tool-mcp/     # MCP 工具实现
+├── docs/               # 用户文档
+├── .ops/               # 研究自动化脚本
+├── scripts/            # 发布/构建辅助脚本
+├── tools/              # 开发工具（lint 等）
+├── third_party/        # 第三方依赖
+├── patches/            # 补丁文件
+├── .github/workflows/  # CI/CD 配置
+├── justfile            # 开发命令入口
+├── MODULE.bazel        # Bazel 模块配置
+├── pnpm-workspace.yaml # PNPM 工作区配置
+└── package.json        # 根级 JS 配置
+```
