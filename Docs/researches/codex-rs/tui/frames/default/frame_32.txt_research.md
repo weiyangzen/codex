@@ -1,0 +1,41 @@
+# 研究报告：codex-rs/tui/frames/default/frame_32.txt
+
+## 场景与职责
+
+`frame_32.txt` 是 Codex TUI 默认 ASCII 艺术动画序列的第 32 帧。
+
+**核心职责**：
+- 作为动画序列的第 32 帧
+- 维持动画流畅性
+
+## 功能点目的
+
+### 动画序列定位
+- **帧序号**: 32/36
+- **时间位置**: 约 2480ms
+- **动画进度**: 约 88.9%
+
+## 具体技术实现
+
+### 编译嵌入
+```rust
+include_str!("../frames/default/frame_32.txt")  // FRAMES_DEFAULT[31]
+```
+
+## 关键代码路径
+
+```
+frame_32.txt → FRAMES_DEFAULT[31] → WelcomeWidget
+```
+
+## 依赖与外部交互
+
+- 属于 `default` 变体
+
+## 风险、边界与改进建议
+
+### 风险
+- 文件缺失
+
+---
+*研究范围：frame_32.txt 技术分析*
