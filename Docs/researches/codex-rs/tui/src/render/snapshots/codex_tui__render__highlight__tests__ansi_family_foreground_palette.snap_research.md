@@ -1,41 +1,23 @@
-# 研究文档：ANSI Family Foreground Palette Snapshot
+# 研究文档：ANSI 家族主题前景色板快照测试
 
-## 文件信息
+## 文件基本信息
 
-- **目标文件**: `codex-rs/tui/src/render/snapshots/codex_tui__render__highlight__tests__ansi_family_foreground_palette.snap`
-- **源文件**: `codex-rs/tui/src/render/highlight.rs`
-- **测试函数**: `ansi_family_foreground_palette_snapshot`
-- **所属模块**: `codex_tui::render::highlight`
-
----
-
-## 1. 场景与职责
-
-### 1.1 整体场景
-
-该 snapshot 文件是 **Codex TUI（Terminal User Interface）** 项目中语法高亮系统的核心测试产物。Codex TUI 是一个基于 Rust 构建的终端交互界面，用于与 AI 编程助手进行交互。在终端环境中，代码语法高亮是一个关键功能，它需要在有限的颜色能力（从基本的 ANSI 16 色到完整的 24-bit 真彩色）下提供良好的可读性。
-
-### 1.2 具体职责
-
-此 snapshot 记录了 **ANSI 家族主题**（`ansi`、`base16`、`base16-256`）在使用语法高亮时实际产生的前景色调色板。其核心职责包括：
-
-1. **验证 ANSI 主题正确使用终端调色板**: 确保这些主题不使用 RGB 真彩色，而是使用终端定义的 ANSI 调色板颜色
-2. **捕获主题升级时的行为变化**: 当 `two_face` 或 `syntect` 依赖更新时，此 snapshot 会检测 ANSI 主题的颜色输出是否发生变化
-3. **作为回归测试**: 防止代码更改意外破坏 ANSI 主题的颜色编码逻辑
-
-### 1.3 业务价值
-
-- **可移植性**: ANSI 主题设计用于在任意终端上工作，无论其是否支持真彩色
-- **一致性**: 用户期望语法高亮颜色与其终端主题协调一致
-- **可访问性**: 在有限颜色能力的终端（如服务器 SSH 会话、旧版终端模拟器）上提供可用的代码高亮
+- **文件路径**: `codex-rs/tui/src/render/snapshots/codex_tui__render__highlight__tests__ansi_family_foreground_palette.snap`
+- **文件大小**: 211 bytes
+- **文件类型**: insta 快照测试文件
+- **对应源码**: `codex-rs/tui/src/render/highlight.rs`
 
 ---
 
-## 2. 功能点目的
+## 场景与职责
 
-### 2.1 测试目标
+### 功能定位
 
-测试函数 `ansi_family_foreground_palette_snapshot` 的核心目的是验证：
+此快照文件是 `codex-tui` crate 中语法高亮模块的测试产物，用于验证 **ANSI 家族主题**（ansi、base16、base16-256）在语法高亮时使用的前景颜色调色板是否符合预期。
+
+### 所属测试
+
+对应 `highlight.rs` 中的测试函数：
 
 ```rust
 #[test]
@@ -52,11 +34,62 @@ fn ansi_family_foreground_palette_snapshot() {
 }
 ```
 
-该测试遍历三个 ANSI 家族主题，收集每个主题在语法高亮 Rust 代码时使用的**唯一前景色集合**，并将结果与 snapshot 比对。
+### 测试目的
 
-### 2.2 Snapshot 内容解读
+1. **验证 ANSI 主题颜色编码正确性**：确保 `ansi`、`base16`、`base16-256` 这三个主题在语法高亮时只使用 ANSI 调色板颜色（而非 RGB 真彩色）
+2. **防止上游主题变更**：当 `two_face` 依赖更新或主题定义变化时，测试能够捕获颜色输出的变化
+3. **文档化预期行为**：通过快照文件记录每个主题实际使用的颜色集合
 
-当前 snapshot 内容如下：
+---
+
+## 功能点目的
+
+### ANSI 家族主题的特殊性
+
+ANSI 家族主题（`ansi`、`base16`、`base16-256`）与普通 RGB 主题不同，它们使用 **alpha 通道编码** 来指示颜色语义：
+
+| Alpha 值 | 含义 |
+|---------|------|
+| `0x00` | `r` 字段存储 ANSI 调色板索引（0-255） |
+| `0x01` | 使用终端默认前景/背景色 |
+| `0xFF` | 标准 RGB 真彩色 |
+
+### 颜色转换逻辑
+
+在 `convert_syntect_color()` 函数中（行 465-476）：
+
+```rust
+fn convert_syntect_color(color: SyntectColor) -> Option<RtColor> {
+    match color.a {
+        ANSI_ALPHA_INDEX => Some(ansi_palette_color(color.r)),  // alpha=0x00
+        ANSI_ALPHA_DEFAULT => None,                              // alpha=0x01
+        OPAQUE_ALPHA => Some(RtColor::Rgb(color.r, color.g, color.b)), // alpha=0xFF
+        _ => Some(RtColor::Rgb(color.r, color.g, color.b)),
+    }
+}
+```
+
+### 调色板索引映射
+
+`ansi_palette_color()` 函数（行 436-449）将低索引（0-7）映射到 ratatui 的命名颜色：
+
+| 索引 | ratatui 颜色 |
+|------|-------------|
+| 0x00 | `Black` |
+| 0x01 | `Red` |
+| 0x02 | `Green` |
+| 0x03 | `Yellow` |
+| 0x04 | `Blue` |
+| 0x05 | `Magenta` |
+| 0x06 | `Cyan` |
+| 0x07 | `Gray`（ANSI white） |
+| 0x08-0xFF | `Indexed(n)` |
+
+---
+
+## 具体技术实现
+
+### 快照文件内容解析
 
 ```yaml
 ---
@@ -82,388 +115,143 @@ base16-256:
   Magenta
 ```
 
-解读：
+### 内容解读
 
 | 主题 | 使用的颜色 | 说明 |
 |------|-----------|------|
-| `ansi` | `Blue`, `Green`, `Magenta`, `Yellow` | 使用标准 ANSI 命名颜色（ratatui 的 `Color::Blue` 等） |
-| `base16` | `Blue`, `Gray`, `Green`, `Indexed(9)`, `Magenta` | 混合使用命名颜色和 ANSI-256 索引颜色（索引 9 是亮红色） |
-| `base16-256` | `Blue`, `Gray`, `Green`, `Indexed(16)`, `Magenta` | 使用索引 16（Grey0，ANSI-256 色域的第一个非系统颜色） |
+| `ansi` | Blue, Green, Magenta, Yellow | 仅使用基本 ANSI 命名颜色（索引 0-7） |
+| `base16` | Blue, Gray, Green, Indexed(9), Magenta | 包含一个扩展颜色 Indexed(9) |
+| `base16-256` | Blue, Gray, Green, Indexed(16), Magenta | 包含 256 色模式颜色 Indexed(16) |
 
-### 2.3 关键观察
+### 测试数据生成流程
 
-1. **无 RGB 颜色**: 所有主题都没有使用 `Rgb(r, g, b)` 变体，这验证了 ANSI 家族主题正确使用调色板而非硬编码 RGB
-2. **索引颜色差异**: `base16` 使用 `Indexed(9)`，而 `base16-256` 使用 `Indexed(16)`，反映了两个主题在调色板设计上的差异
-3. **共同颜色**: 三个主题共享 `Blue`, `Green`, `Magenta`，这些是语法高亮的核心颜色（关键字、字符串、注释等）
-
----
-
-## 3. 具体技术实现
-
-### 3.1 核心数据结构
-
-#### 3.1.1 颜色编码约定（Alpha 通道语义）
-
-```rust
-// Syntect/bat 在 alpha 通道编码 ANSI 调色板语义：
-const ANSI_ALPHA_INDEX: u8 = 0x00;    // a=0 => r 存储 ANSI 调色板索引
-const ANSI_ALPHA_DEFAULT: u8 = 0x01;  // a=1 => 使用终端默认前景色
-const OPAQUE_ALPHA: u8 = 0xFF;        // a=255 => 标准 RGB 颜色
-```
-
-这是 **bat** 编辑器和 **syntect** 库之间的约定，允许主题在 `.tmTheme` 文件中通过特殊的 alpha 值来指定"使用 ANSI 调色板"。
-
-#### 3.1.2 颜色转换函数
-
-```rust
-fn convert_syntect_color(color: SyntectColor) -> Option<RtColor> {
-    match color.a {
-        ANSI_ALPHA_INDEX => Some(ansi_palette_color(color.r)),  // 从 r 字段提取索引
-        ANSI_ALPHA_DEFAULT => None,                              // 终端默认色
-        OPAQUE_ALPHA => Some(RtColor::Rgb(color.r, color.g, color.b)),
-        _ => Some(RtColor::Rgb(color.r, color.g, color.b)),      // 非预期值回退到 RGB
-    }
-}
-```
-
-#### 3.1.3 ANSI 调色板映射
-
-```rust
-fn ansi_palette_color(index: u8) -> RtColor {
-    match index {
-        0x00 => RtColor::Black,
-        0x01 => RtColor::Red,
-        0x02 => RtColor::Green,
-        0x03 => RtColor::Yellow,
-        0x04 => RtColor::Blue,
-        0x05 => RtColor::Magenta,
-        0x06 => RtColor::Cyan,
-        0x07 => RtColor::Gray,  // ANSI 白色映射为 Gray
-        n => RtColor::Indexed(n),  // 8-255 使用索引颜色
-    }
-}
-```
-
-### 3.2 关键流程
-
-#### 3.2.1 主题解析流程
-
-```
-用户配置主题名
-    │
-    ▼
-parse_theme_name() ──► 匹配内置主题 ──► EmbeddedThemeName 枚举
-    │
-    └─ 不匹配 ──► 尝试加载 {CODEX_HOME}/themes/{name}.tmTheme
-                        │
-                        ▼
-                   自定义主题文件
-```
-
-#### 3.2.2 语法高亮流程
-
-```
-代码输入
-    │
-    ▼
-highlight_code_to_lines()
-    │
-    ▼
-highlight_to_line_spans()
-    │
-    ▼
-find_syntax(lang) ──► 语言检测（支持 250+ 语言）
-    │
-    ▼
-HighlightLines::highlight_line() ──► syntect 解析
-    │
-    ▼
-convert_style() ──► 颜色转换（关键：ANSI 编码识别）
-    │
-    ▼
-Vec<Line<'static>> ──► 可渲染的 ratatui 文本行
-```
-
-#### 3.2.3 测试数据生成流程
-
-```rust
-fn unique_foreground_colors_for_theme(theme_name: &str) -> Vec<String> {
-    // 1. 解析主题
-    let theme = resolve_theme_by_name(theme_name, None).unwrap();
-    
-    // 2. 高亮示例 Rust 代码
-    let lines = highlight_to_line_spans_with_theme(
-        "fn main() { let answer = 42; println!(\"hello\"); }\n",
-        "rust",
-        &theme,
-    ).expect("expected highlighted spans");
-    
-    // 3. 提取所有唯一前景色
-    let mut colors: Vec<String> = lines
-        .iter()
-        .flat_map(|line| line.iter().filter_map(|span| span.style.fg))
-        .map(|fg| format!("{fg:?}"))
-        .collect();
-    colors.sort();
-    colors.dedup();
-    colors
-}
-```
-
-### 3.3 依赖库
-
-| 库 | 版本 | 用途 |
-|---|------|------|
-| `syntect` | 5.x | 核心语法高亮引擎，基于 TextMate 语法 |
-| `two_face` | 0.5 | 提供预打包的语法定义（~250 语言）和主题（32 个） |
-| `ratatui` | workspace | 终端 UI 渲染，提供 `Color`、`Style`、`Line` 等类型 |
+1. **测试代码样本**：使用 Rust 代码片段 `"fn main() { let answer = 42; println!("hello"); }\n"`
+2. **语法高亮处理**：通过 `highlight_to_line_spans_with_theme()` 生成带样式的 span
+3. **颜色提取**：`unique_foreground_colors_for_theme()` 收集所有唯一的前景颜色
+4. **快照比对**：使用 `insta::assert_snapshot!` 比对输出
 
 ---
 
-## 4. 关键代码路径与文件引用
+## 关键代码路径与文件引用
 
-### 4.1 核心文件
+### 核心文件
 
-| 文件路径 | 行数 | 关键内容 |
-|---------|------|---------|
-| `codex-rs/tui/src/render/highlight.rs` | 1-1496 | 完整的语法高亮实现 |
-| `codex-rs/tui/src/render/mod.rs` | 1-50 | 渲染模块组织 |
-| `codex-rs/tui/src/render/line_utils.rs` | 1-59 | 行操作工具函数 |
-| `codex-rs/tui/src/render/renderable.rs` | 1-430 | 可渲染 trait 体系 |
-
-### 4.2 关键代码位置
-
-#### 4.2.1 颜色转换（highlight.rs:465-476）
-
-```rust
-fn convert_syntect_color(color: SyntectColor) -> Option<RtColor> {
-    match color.a {
-        ANSI_ALPHA_INDEX => Some(ansi_palette_color(color.r)),
-        ANSI_ALPHA_DEFAULT => None,
-        OPAQUE_ALPHA => Some(RtColor::Rgb(color.r, color.g, color.b)),
-        _ => Some(RtColor::Rgb(color.r, color.g, color.b)),
-    }
-}
-```
-
-#### 4.2.2 ANSI 调色板映射（highlight.rs:436-449）
-
-```rust
-fn ansi_palette_color(index: u8) -> RtColor {
-    match index {
-        0x00 => RtColor::Black,
-        0x01 => RtColor::Red,
-        0x02 => RtColor::Green,
-        0x03 => RtColor::Yellow,
-        0x04 => RtColor::Blue,
-        0x05 => RtColor::Magenta,
-        0x06 => RtColor::Cyan,
-        0x07 => RtColor::Gray,
-        n => RtColor::Indexed(n),
-    }
-}
-```
-
-#### 4.2.3 测试函数（highlight.rs:1036-1047）
-
-```rust
-#[test]
-fn ansi_family_foreground_palette_snapshot() {
-    let mut out = String::new();
-    for theme_name in ["ansi", "base16", "base16-256"] {
-        let colors = unique_foreground_colors_for_theme(theme_name);
-        out.push_str(&format!("{theme_name}:\n"));
-        for color in colors {
-            out.push_str(&format!("  {color}\n"));
-        }
-    }
-    assert_snapshot!("ansi_family_foreground_palette", out);
-}
-```
-
-#### 4.2.4 相关测试（highlight.rs:1006-1034）
-
-```rust
-fn ansi_family_themes_use_terminal_palette_colors_not_rgb() {
-    for theme_name in ["ansi", "base16", "base16-256"] {
-        // ... 验证不产生 RGB 前景色
-    }
-}
-```
-
-### 4.3 主题定义
-
-内置主题列表（highlight.rs:389-422）：
-
-```rust
-const BUILTIN_THEME_NAMES: &[&str] = &[
-    "1337", "ansi", "base16", "base16-256",
-    "base16-eighties-dark", "base16-mocha-dark",
-    // ... 共 32 个主题
-];
-```
-
----
-
-## 5. 依赖与外部交互
-
-### 5.1 上游依赖
-
-```
-two_face::theme::extra() ──► 提供 EmbeddedLazyThemeSet
-    │
-    ├─ EmbeddedThemeName::Ansi
-    ├─ EmbeddedThemeName::Base16
-    ├─ EmbeddedThemeName::Base16_256
-    └─ ... 其他 29 个主题
-
-syntect::highlighting::Theme ──► 主题数据结构
-syntect::parsing::SyntaxSet ──► 语法定义数据库
-```
-
-### 5.2 下游消费者
-
-```
-codex_tui::render::highlight
-    │
-    ├─ highlight_code_to_lines() ──► markdown_render.rs（代码块高亮）
-    ├─ highlight_bash_to_lines() ──► exec_cell.rs（命令高亮）
-    └─ highlight_code_to_styled_spans() ──► diff_render.rs（diff 语法高亮）
-```
-
-### 5.3 配置交互
-
-```
-用户配置 (config.toml)
-    │
-    ▼
-set_theme_override(name, codex_home)
-    │
-    ├─ 内置主题 ──► parse_theme_name() ──► EmbeddedThemeName
-    │
-    └─ 自定义主题 ──► {codex_home}/themes/{name}.tmTheme
-```
-
----
-
-## 6. 风险、边界与改进建议
-
-### 6.1 当前风险
-
-#### 6.1.1 上游主题变更风险
-
-**风险**: `two_face` 库更新时，内置的 `ansi`、`base16`、`base16-256` 主题可能改变其颜色定义。
-
-**缓解**: 
-- snapshot 测试会在 CI 中失败，强制审查变更
-- `ansi_family_themes_use_terminal_palette_colors_not_rgb` 测试确保不会产生 RGB 颜色
-
-**代码注释**（highlight.rs:63-68）：
-```rust
-// NOTE: 当 ANSI 家族主题缺少预期的 alpha 通道标记编码时，
-// 我们有意不发出运行时诊断。如果上游 two_face/syntect 
-// 主题格式发生变化，`ansi_themes_use_only_ansi_palette_colors` 
-// 测试会在构建时捕获它。
-```
-
-#### 6.1.2 颜色编码约定依赖风险
-
-**风险**: 颜色编码依赖于 bat/syntect 的 alpha 通道约定（`a=0` 表示 ANSI 索引）。如果上游更改此约定，颜色转换将失效。
-
-**缓解**: 
-- snapshot 测试会捕获行为变化
-- 回退逻辑处理非预期 alpha 值（视为 RGB）
-
-### 6.2 边界条件
-
-#### 6.2.1 输入大小限制
-
-```rust
-const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;  // 512 KB
-const MAX_HIGHLIGHT_LINES: usize = 10_000;       // 1 万行
-```
-
-超过限制的输入将回退到纯文本（无语法高亮），防止资源耗尽。
-
-#### 6.2.2 终端能力边界
-
-| 终端能力 | 行为 |
+| 文件路径 | 职责 |
 |---------|------|
-| TrueColor (24-bit) | 使用 RGB 主题（非 ANSI 家族） |
-| ANSI-256 | 使用 `base16-256`，索引颜色 0-255 |
-| ANSI-16 | 使用 `ansi` 或 `base16`，命名颜色 |
-| 无颜色 | 纯文本 |
+| `codex-rs/tui/src/render/highlight.rs` | 语法高亮引擎主实现 |
+| `codex-rs/tui/src/render/snapshots/codex_tui__render__highlight__tests__ansi_family_foreground_palette.snap` | 本快照文件 |
 
-### 6.3 改进建议
+### 关键函数调用链
 
-#### 6.3.1 增强测试覆盖
-
-当前 snapshot 只测试了 Rust 语言的示例代码。建议：
-
-```rust
-// 建议添加：多语言测试
-#[test]
-fn ansi_family_foreground_palette_multilang() {
-    let languages = ["python", "javascript", "go", "bash"];
-    // 验证 ANSI 主题在不同语言下也正确使用调色板
-}
+```
+ansi_family_foreground_palette_snapshot()
+  └── unique_foreground_colors_for_theme(theme_name)
+        ├── resolve_theme_by_name(theme_name, None)
+        │     └── parse_theme_name() / two_face::theme::extra()
+        └── highlight_to_line_spans_with_theme(code, "rust", &theme)
+              ├── find_syntax("rust")
+              ├── HighlightLines::new(syntax, theme)
+              └── convert_style(syntect_style)
+                    └── convert_syntect_color(color)
+                          └── ansi_palette_color(index)  // 关键转换
 ```
 
-#### 6.3.2 文档改进
+### 相关测试
 
-在 `highlight.rs` 模块文档中添加 ANSI 编码约定的详细说明：
-
-```rust
-//! ## ANSI 调色板编码
-//! 
-//! ANSI 家族主题（ansi, base16, base16-256）使用特殊的 alpha 通道值
-//! 来编码调色板语义，这是与 bat 编辑器兼容的约定：
-//! 
-//! | Alpha 值 | 含义 | 处理方式 |
-//! |---------|------|---------|
-//! | 0x00 | ANSI 调色板索引 | `color.r` 作为索引（0-255） |
-//! | 0x01 | 终端默认色 | 返回 `None`（使用终端默认） |
-//! | 0xFF | 标准 RGB | 使用 `color.r/g/b` 作为 RGB |
-//! | 其他 | 非预期值 | 回退到 RGB 处理 |
-```
-
-#### 6.3.3 性能优化
-
-当前 `unique_foreground_colors_for_theme` 在测试中每次都会重新高亮代码。对于生产代码中的频繁调用，考虑：
-
-1. **缓存高亮结果**: 使用 `cached` crate 或自定义 LRU 缓存
-2. **增量更新**: 主题切换时只重新高亮可见区域
-
-#### 6.3.4 可观测性
-
-添加诊断日志，帮助用户理解当前使用的主题和颜色模式：
-
-```rust
-tracing::debug!(
-    theme = theme_name,
-    ansi_colors_used = colors.len(),
-    "ANSI family theme palette"
-);
-```
-
-### 6.4 相关 Issue 预防
-
-| 潜在问题 | 预防措施 |
-|---------|---------|
-| 主题更新导致颜色突变 | snapshot 测试 + 手动审查 |
-| 新终端类型颜色显示异常 | 扩展终端能力检测（`terminal_palette.rs`） |
-| 自定义主题与 ANSI 编码冲突 | 文档说明 + 验证工具 |
-| 高亮大文件卡顿 | 输入大小限制 + 异步处理 |
+| 测试函数 | 行号 | 说明 |
+|---------|------|------|
+| `ansi_family_themes_use_terminal_palette_colors_not_rgb` | 1007-1034 | 验证 ANSI 主题不使用 RGB 颜色 |
+| `ansi_family_foreground_palette_snapshot` | 1037-1047 | 本快照对应的测试 |
+| `style_conversion_uses_ansi_named_color_when_alpha_is_zero_low_index` | 918-936 | 验证低索引颜色映射 |
+| `style_conversion_uses_indexed_color_when_alpha_is_zero_high_index` | 939-957 | 验证高索引颜色映射 |
 
 ---
 
-## 7. 总结
+## 依赖与外部交互
 
-该 snapshot 文件是 Codex TUI 语法高亮系统的关键回归测试，确保 ANSI 家族主题（`ansi`、`base16`、`base16-256`）正确使用终端调色板而非硬编码 RGB 颜色。其技术核心在于 bat/syntect 的 alpha 通道编码约定，通过 `convert_syntect_color` 函数将主题颜色映射到 ratatui 的 `Color` 类型。
+### 外部依赖
 
-理解此文件需要掌握：
-1. **终端颜色模型**: ANSI-16、ANSI-256、TrueColor 的区别
-2. **syntect 架构**: TextMate 主题格式、语法定义、高亮管线
-3. **Rust 测试实践**: insta snapshot 测试的使用场景
+| 依赖 | 版本 | 用途 |
+|------|------|------|
+| `syntect` | 5 | 语法高亮核心库 |
+| `two_face` | 0.5 | 提供扩展语法集和主题包 |
+| `ratatui` | workspace | 终端 UI 渲染 |
+| `insta` | workspace | 快照测试框架 |
 
-该测试与 `ansi_family_themes_use_terminal_palette_colors_not_rgb` 测试形成互补，前者捕获颜色集合的变化，后者验证不产生 RGB 颜色，共同保障 ANSI 主题的正确行为。
+### two_face 主题集成
+
+```rust
+// 使用 two_face 的 EmbeddedThemeName 枚举
+fn parse_theme_name(name: &str) -> Option<EmbeddedThemeName> {
+    match name {
+        "ansi" => Some(EmbeddedThemeName::Ansi),
+        "base16" => Some(EmbeddedThemeName::Base16),
+        "base16-256" => Some(EmbeddedThemeName::Base16_256),
+        // ... 其他主题
+    }
+}
+```
+
+### 主题来源
+
+- **内置主题**：通过 `two_face::theme::extra()` 获取，共 32 个主题
+- **自定义主题**：从 `$CODEX_HOME/themes/{name}.tmTheme` 加载
+
+---
+
+## 风险、边界与改进建议
+
+### 潜在风险
+
+1. **上游主题变更风险**
+   - `two_face` 更新可能改变主题颜色定义
+   - **缓解措施**：此快照测试会在 CI 中失败，强制开发者审查变更
+
+2. **ANSI 编码约定依赖**
+   - 代码注释（行 63-68）说明：如果上游 `two_face/syntect` 改变主题格式，测试会捕获
+   - **注意**：运行时不会发出警告，因为用户无法修复上游主题
+
+3. **测试数据局限性**
+   - 仅使用单一代码样本（Rust 代码）测试
+   - 不同语法可能触发不同的颜色路径
+
+### 边界情况
+
+| 场景 | 处理方式 |
+|------|---------|
+| 颜色索引 > 7 | 使用 `RtColor::Indexed(n)` 而非命名颜色 |
+| Alpha = 0x01 | 返回 `None`，使用终端默认颜色 |
+| 未知 Alpha 值 | 回退到 RGB 处理 |
+
+### 改进建议
+
+1. **扩展测试覆盖**
+   ```rust
+   // 建议：测试更多语言的高亮颜色
+   for lang in ["python", "javascript", "go"] {
+       let colors = unique_foreground_colors_for_theme_with_lang(theme_name, lang);
+       // ...
+   }
+   ```
+
+2. **添加颜色数量断言**
+   ```rust
+   // 确保每个主题至少使用 N 种不同颜色
+   assert!(colors.len() >= 3, "{theme_name} should use at least 3 colors");
+   ```
+
+3. **文档化主题差异**
+   - 在代码注释中解释为什么 `base16` 使用 `Indexed(9)` 而 `base16-256` 使用 `Indexed(16)`
+   - 这些差异反映了两个主题的设计意图（16色 vs 256色支持）
+
+4. **监控上游变更**
+   - 在 `parse_theme_name_is_exhaustive` 测试中（行 1435-1495），已强制要求更新主题映射
+   - 建议同样监控 `two_face` 版本变更对 ANSI 编码的影响
+
+---
+
+## 关联文件
+
+- **平行实现**：`codex-rs/tui_app_server/src/render/highlight.rs`（相同逻辑，不同 crate）
+- **对应快照**：`codex-rs/tui_app_server/src/render/snapshots/codex_tui_app_server__render__highlight__tests__ansi_family_foreground_palette.snap`
+- **样式指南**：`codex-rs/tui/styles.md`

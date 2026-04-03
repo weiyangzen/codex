@@ -1,202 +1,488 @@
-# `.codex` 目录研究（DIR）
+# `.codex` 目录深度研究文档
 
-## 场景与职责
+> 研究对象：`.codex/` 目录  
+> 研究时间：2026-03-22  
+> 项目：OpenAI Codex CLI  
 
-`.codex` 在本仓库中承担“仓库内本地技能包（repo-scoped skills）”的角色，供 Codex 运行时动态发现并注入到会话提示中。当前目录结构很小但职责明确：
+---
 
-- `.codex/skills/babysit-pr/`：PR 值守（CI/Review/可合并性）自动化技能。
-- `.codex/skills/test-tui/`：TUI 交互验证操作约定技能。
+## 一、场景与职责
 
-它不是 Rust 主业务代码目录，但会被 `codex-rs/core` 的技能发现链路加载，并影响：
+### 1.1 定位与作用
 
-1. 会话中的“可用技能列表”渲染与提示注入。
-2. 用户显式/隐式技能触发行为。
-3. app-server `skills/list` / `skills/changed` 对外协议输出。
+`.codex/` 目录是 **Kimi Code CLI (codex-cli)** 项目的 **Skill System（技能系统）** 存储目录。它存放着可被 AI Agent 动态加载和执行的领域特定技能（Skills），用于扩展 Codex 的能力边界。
 
-关键入口：
+### 1.2 核心职责
 
-- 技能目录扫描：`codex-rs/core/src/skills/loader.rs:218,231,309,388`
-- `.codex` 配置层加载：`codex-rs/core/src/config_loader/mod.rs:102-103,114,792,819`
-- 技能提示渲染：`codex-rs/core/src/skills/render.rs:5`
+| 职责 | 说明 |
+|------|------|
+| **技能定义存储** | 存放 YAML/MD 格式的技能定义文件 |
+| **脚本托管** | 存放技能所需的辅助脚本（如 Python、Shell） |
+| **Agent 配置** | 定义技能的 Agent 接口和提示词模板 |
+| **参考文档** | 存放技能的参考材料、启发式规则、API 文档等 |
 
-## 功能点目的
+### 1.3 使用场景
 
-### 1) `babysit-pr` 技能
+1. **PR 自动化看护** (`babysit-pr`): 监控 GitHub PR 的 CI 状态、Review 评论、合并冲突，自动修复问题或重试 flaky 测试
+2. **TUI 交互测试** (`test-tui`): 指导如何以交互方式测试 Codex TUI 应用
 
-目标：把“PR 持续值守”从一次性查询变成持续循环流程（监控 -> 诊断 -> 修复/重试 -> 继续监控），直到严格终止条件达成。
+---
 
-- 技能定义与流程规范：`.codex/skills/babysit-pr/SKILL.md:1-185`
-- UI/agent 卡片元信息与默认 prompt：`.codex/skills/babysit-pr/agents/openai.yaml:1-4`
-- 决策参考：
-  - `.codex/skills/babysit-pr/references/heuristics.md:1-58`
-  - `.codex/skills/babysit-pr/references/github-api-notes.md:1-72`
-- 可执行 watcher：`.codex/skills/babysit-pr/scripts/gh_pr_watch.py`
+## 二、功能点目的
 
-### 2) `test-tui` 技能
+### 2.1 Skill: `babysit-pr` - PR 自动化看护
 
-目标：给 TUI 交互测试提供统一、可复现的操作细则，避免调试时日志/输入时序不一致。
+#### 目的
+解决开发者在提交 PR 后需要持续监控 CI 状态、处理 Review 反馈的繁琐工作。通过自动化轮询和智能决策，减少人工干预。
 
-- 定义：`.codex/skills/test-tui/SKILL.md:1-14`
-- 约束包括：`RUST_LOG=trace`、`-c log_dir=...`、输入与 Enter 分开发送。
+#### 核心功能
 
-### 3) `.codex` 作为 repo 技能根目录
+| 功能模块 | 目的 |
+|---------|------|
+| **CI 状态监控** | 持续轮询 GitHub Actions 检查状态，识别失败/通过/ pending |
+| **失败分类** | 区分"分支相关失败"（代码问题）vs "flaky/基础设施失败" |
+| **自动重试** | 对 flaky 失败自动重试（最多3次），避免人工干预 |
+| **Review 处理** | 监控 PR 评论、Review 评论、Review 提交，识别可操作的反馈 |
+| **合并就绪检测** | 综合判断 CI 通过 + Review 清理 + 可合并状态 |
 
-目标：为当前仓库提供随代码同行的技能能力，不依赖用户全局目录。
+#### 终端状态判定
 
-- repo 层根路径识别与扫描：`.codex/skills`（由 loader 从项目配置层推导）
-- 与 `~/.agents/skills`、`$CODEX_HOME/skills/.system` 共存并按 scope 排序。
+```
+停止条件（严格）：
+├── PR 已合并或关闭
+├── PR 就绪可合并（CI 通过 + 无未处理 Review + 无冲突 + 非 Draft）
+└── 需要用户干预（基础设施问题、重试预算耗尽、权限问题）
+```
 
-## 具体技术实现（关键流程/数据结构/协议/命令）
+### 2.2 Skill: `test-tui` - TUI 测试指导
 
-### A. 技能发现与注入主流程
+#### 目的
+为开发者提供标准化的 Codex TUI 交互测试指南，确保测试环境配置正确。
 
-1. 配置层解析 `.codex`
-- `load_config_layers_state` 会加载 cwd 到 project root 间各层 `.codex/config.toml`：`codex-rs/core/src/config_loader/mod.rs:102-103,114,205,243,792,819`
-- project trust 不满足时层会保留但 disabled：`.../config_loader/mod.rs:599,633,663`
+#### 核心要点
+- 必须设置 `RUST_LOG="trace"` 进行调试
+- 使用 `-c log_dir=<temp_dir>` 指定日志目录
+- 程序化发送消息时需分两次写入（文本 + Enter）
+- 使用 `just codex` 目标运行
 
-2. 计算 skills roots
-- `skill_roots()` 组合 repo/user/system/admin roots：`codex-rs/core/src/skills/loader.rs:218-243`
-- repo roots 包含 `.codex/skills` 与 `.agents/skills`：`.../loader.rs:309-320`
+---
 
-3. 扫描并解析 `SKILL.md`
-- 遍历规则：`SKILL.md` 文件名固定、最大深度 6、最多 2000 目录：`.../loader.rs:133,149-150,388-521`
-- Frontmatter 解析与校验：`.../loader.rs:527-600`
-- 可选元数据 `agents/openai.yaml` 解析（interface/dependencies/policy/permissions）：`.../loader.rs:602-652,693-759`
+## 三、具体技术实现
 
-4. 会话注入
-- 会话启动加载技能：`codex-rs/core/src/codex.rs:441`
-- 生成 `<skills_instructions>` 段落：`codex-rs/core/src/skills/render.rs:5-46`
-- 常量标签定义：`codex-rs/protocol/src/protocol.rs:90-91`
+### 3.1 文件组织结构
 
-5. 显式与隐式触发
-- 显式：`$skill-name`、`UserInput::Skill{name,path}` 解析：`codex-rs/core/src/skills/injection.rs:100,235`
-- `UserInput::Skill` 协议形态：`codex-rs/protocol/src/user_input.rs:30-35`
-- 隐式：执行 `scripts/*.py|sh|...` 或读取 `SKILL.md` 时记录技能调用：`codex-rs/core/src/skills/invocation_utils.rs:13,56,177,204`
+```
+.codex/
+├── skills/
+│   ├── babysit-pr/
+│   │   ├── SKILL.md              # 技能主定义文档（YAML Front Matter + Markdown）
+│   │   ├── agents/
+│   │   │   └── openai.yaml       # Agent 接口定义（显示名称、描述、默认提示词）
+│   │   ├── references/
+│   │   │   ├── github-api-notes.md   # GitHub CLI/API 使用说明
+│   │   │   └── heuristics.md         # CI/Review 启发式决策规则
+│   │   └── scripts/
+│   │       └── gh_pr_watch.py    # 核心实现：PR 监控脚本（805行 Python）
+│   └── test-tui/
+│       └── SKILL.md              # TUI 测试指南
+```
 
-### B. 变更监听与缓存失效
+### 3.2 `gh_pr_watch.py` 关键技术实现
 
-- 线程启动时注册技能根目录 watcher：`codex-rs/core/src/thread_manager.rs:754`
-- 文件事件节流聚合后发 `SkillsChanged`：`codex-rs/core/src/file_watcher.rs:42,146,193,314`
-- 收到事件后清理 skills 缓存：`codex-rs/core/src/thread_manager.rs:104`
-- 会话侧转发 `EventMsg::SkillsUpdateAvailable`：`codex-rs/core/src/codex.rs:1271-1277`
-- app-server 再映射为 `skills/changed`：`codex-rs/app-server/src/bespoke_event_handling.rs:303-307`
+#### 3.2.1 核心常量定义
 
-### C. `babysit-pr` watcher 脚本核心机制
+```python
+# 失败运行结论集合
+FAILED_RUN_CONCLUSIONS = {
+    "failure", "timed_out", "cancelled", 
+    "action_required", "startup_failure", "stale"
+}
 
-脚本：`.codex/skills/babysit-pr/scripts/gh_pr_watch.py`（805 行）
+# Pending 状态集合
+PENDING_CHECK_STATES = {
+    "QUEUED", "IN_PROGRESS", "PENDING", 
+    "WAITING", "REQUESTED"
+}
 
-1. 输入模式
-- `--once`、`--watch`、`--retry-failed-now`：`gh_pr_watch.py:55-93,785-793`
+# 可信作者关联（用于 Review 过滤）
+TRUSTED_AUTHOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
-2. 采样数据源
-- PR 元信息：`resolve_pr()` -> `gh pr view`：`gh_pr_watch.py:157`
-- 检查项：`get_pr_checks()`：`gh_pr_watch.py:265`
-- 工作流运行：`get_workflow_runs_for_sha()`：`gh_pr_watch.py:305`
-- 评论/Review 聚合：`fetch_new_review_items()`：`gh_pr_watch.py:468`
+# 合并阻塞性 Review 决策
+MERGE_BLOCKING_REVIEW_DECISIONS = {"REVIEW_REQUIRED", "CHANGES_REQUESTED"}
 
-3. 行为决策
-- 终止/重试/诊断动作生成：`recommend_actions()`：`gh_pr_watch.py:572`
-- “可合并”判定含 mergeable、merge_state_status、review_decision：`gh_pr_watch.py:553-569`
+# 绿色状态最大轮询间隔（秒）
+GREEN_STATE_MAX_POLL_SECONDS = 60 * 60  # 1小时
+```
 
-4. 状态持久化
-- 默认 state 文件：`/tmp/codex-babysit-pr-<repo>-pr<n>.json`：`gh_pr_watch.py:260-263`
-- 原子写 state：`save_state()`：`gh_pr_watch.py:243`
+#### 3.2.2 状态数据结构
 
-5. 重试与轮询策略
-- flaky retry 上限（默认 3）：`parse_args` 与 `retry_failed_now`：`gh_pr_watch.py:64-69,652`
-- 绿色态指数退避，上限 1h：`gh_pr_watch.py:48,747-780`
+```python
+# 状态文件结构（JSON）
+{
+    "pr": {"repo": "owner/repo", "number": 123},
+    "started_at": 1711094400,
+    "last_seen_head_sha": "abc123...",
+    "retries_by_sha": {"abc123...": 2},  # 每个 SHA 的重试计数
+    "seen_issue_comment_ids": ["123", "456"],
+    "seen_review_comment_ids": ["789"],
+    "seen_review_ids": ["101112"],
+    "last_snapshot_at": 1711094500
+}
+```
 
-### D. app-server 协议与命令面
+#### 3.2.3 快照数据结构
 
-- `skills/list` 参数含 `cwds`、`forceReload`、`perCwdExtraUserRoots`：
-  - 协议定义：`codex-rs/app-server-protocol/src/protocol/v2.rs:3065-3092`
-  - 处理逻辑：`codex-rs/app-server/src/codex_message_processor.rs:5385-5454`
-- `skills/changed` 通知定义：`.../v2.rs:4654-4656`
-- README 对外示例：`codex-rs/app-server/README.md:1092-1146`
+```python
+{
+    "pr": {
+        "number": 123,
+        "url": "https://github.com/owner/repo/pull/123",
+        "repo": "owner/repo",
+        "head_sha": "abc123...",
+        "head_branch": "feature-branch",
+        "state": "OPEN",
+        "merged": False,
+        "closed": False,
+        "mergeable": "MERGEABLE",
+        "merge_state_status": "CLEAN",
+        "review_decision": ""
+    },
+    "checks": {
+        "pending_count": 2,
+        "failed_count": 1,
+        "passed_count": 30,
+        "all_terminal": False  # 是否所有检查都已结束
+    },
+    "failed_runs": [
+        {
+            "run_id": 123456789,
+            "workflow_name": "CI",
+            "status": "completed",
+            "conclusion": "failure",
+            "html_url": "..."
+        }
+    ],
+    "new_review_items": [
+        {
+            "kind": "issue_comment|review_comment|review",
+            "id": "123",
+            "author": "username",
+            "author_association": "MEMBER",
+            "created_at": "2024-03-22T10:00:00Z",
+            "body": "评论内容",
+            "path": "src/file.rs",  # review_comment 特有
+            "line": 42,             # review_comment 特有
+            "url": "..."
+        }
+    ],
+    "actions": [
+        "idle|diagnose_ci_failure|retry_failed_checks|process_review_comment|"
+        "stop_pr_closed|stop_ready_to_merge|stop_exhausted_retries"
+    ],
+    "retry_state": {
+        "current_sha_retries_used": 2,
+        "max_flaky_retries": 3
+    }
+}
+```
 
-## 关键代码路径与文件引用
+#### 3.2.4 GitHub CLI 调用封装
 
-### `.codex` 目录自身
+```python
+def gh_text(args, repo=None):
+    """执行 gh 命令，返回文本输出"""
+    cmd = ["gh"]
+    if repo and args[0] != "api":  # gh api 不接受 -R 参数
+        cmd.extend(["-R", repo])
+    cmd.extend(args)
+    proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return proc.stdout
 
-- `.codex/skills/babysit-pr/SKILL.md`
-- `.codex/skills/babysit-pr/agents/openai.yaml`
-- `.codex/skills/babysit-pr/references/heuristics.md`
-- `.codex/skills/babysit-pr/references/github-api-notes.md`
-- `.codex/skills/babysit-pr/scripts/gh_pr_watch.py`
-- `.codex/skills/test-tui/SKILL.md`
+def gh_json(args, repo=None):
+    """执行 gh 命令，返回解析后的 JSON"""
+    raw = gh_text(args, repo=repo).strip()
+    return json.loads(raw) if raw else None
+```
 
-### 上游调用方（who calls `.codex`）
+#### 3.2.5 关键 API 调用
 
-- `.codex` 配置层发现：`codex-rs/core/src/config_loader/mod.rs:102-103,114,792,819`
-- skills roots 构造：`codex-rs/core/src/skills/loader.rs:218-243,309-320`
-- skills 扫描与解析：`codex-rs/core/src/skills/loader.rs:388-652`
-- 会话注入：`codex-rs/core/src/codex.rs:441,3492`
-- app-server 列举：`codex-rs/app-server/src/codex_message_processor.rs:5385-5454`
+| 功能 | 命令 |
+|------|------|
+| PR 元数据 | `gh pr view --json number,url,state,mergedAt,closedAt,headRefName,headRefOid,...` |
+| 检查摘要 | `gh pr checks --json name,state,bucket,link,workflow,event,startedAt,completedAt` |
+| 工作流运行 | `gh api repos/{owner}/{repo}/actions/runs -X GET -f head_sha=<sha>` |
+| 失败日志 | `gh run view <run-id> --log-failed` |
+| 重试失败任务 | `gh run rerun <run-id> --failed` |
+| Issue 评论 | `gh api repos/{owner}/{repo}/issues/<pr_number>/comments` |
+| Review 评论 | `gh api repos/{owner}/{repo}/pulls/<pr_number>/comments` |
+| Review 提交 | `gh api repos/{owner}/{repo}/pulls/<pr_number>/reviews` |
 
-### 下游被调用方（`.codex` calls what）
+#### 3.2.6 自适应轮询算法
 
-- `babysit-pr` 调用 GitHub CLI/API：`gh_pr_watch.py:100-124,305-317,652-700`
-- `test-tui` 依赖 `just codex` 运行流程：`.codex/skills/test-tui/SKILL.md:14`
+```python
+def run_watch(args):
+    poll_seconds = args.poll_seconds  # 默认 30 秒
+    last_change_key = None
+    
+    while True:
+        snapshot, state_path = collect_snapshot(args)
+        print_event("snapshot", {...})
+        
+        actions = set(snapshot.get("actions") or [])
+        if any(stop_action in actions for stop_action in 
+               ["stop_pr_closed", "stop_exhausted_retries", "stop_ready_to_merge"]):
+            print_event("stop", {...})
+            return 0
+        
+        current_change_key = snapshot_change_key(snapshot)
+        changed = current_change_key != last_change_key
+        green = is_ci_green(snapshot)
+        
+        # 自适应调整轮询间隔
+        if not green:
+            poll_seconds = args.poll_seconds  # CI 未通过：保持短间隔
+        elif changed or last_change_key is None:
+            poll_seconds = args.poll_seconds  # 状态变化：重置短间隔
+        else:
+            # CI 通过且状态无变化：指数退避，最大 1 小时
+            poll_seconds = min(poll_seconds * 2, GREEN_STATE_MAX_POLL_SECONDS)
+        
+        last_change_key = current_change_key
+        time.sleep(poll_seconds)
+```
 
-### 关键测试
+#### 3.2.7 Review 项目过滤逻辑
 
-- `.codex` skills root 解析与优先级：`codex-rs/core/src/skills/loader_tests.rs:144-193,1575-1754`
-- `.codex` project layer 加载顺序/信任行为：`codex-rs/core/src/config_loader/tests.rs:768-811,910-939,1334-1384`
-- watcher 对 `.codex/skills` 路径判定：`codex-rs/core/src/file_watcher_tests.rs:79-95`
-- 显式技能解析与隐式调用：
-  - `codex-rs/core/src/skills/injection_tests.rs:82-336`
-  - `codex-rs/core/src/skills/invocation_utils_tests.rs:1-119`
+```python
+def fetch_new_review_items(pr, state, fresh_state, authenticated_login=None):
+    # 1. 获取所有评论数据（分页）
+    issue_payload = gh_api_list_paginated(endpoints["issue_comment"])
+    review_comment_payload = gh_api_list_paginated(endpoints["review_comment"])
+    review_payload = gh_api_list_paginated(endpoints["review"])
+    
+    # 2. 标准化为统一格式
+    all_items = normalize_issue_comments(issue_payload) + \
+                normalize_review_comments(review_comment_payload) + \
+                normalize_reviews(review_payload)
+    
+    # 3. 过滤逻辑
+    for item in all_items:
+        author = item.get("author") or ""
+        
+        # 过滤 Bot：只保留特定关键词的 Bot（如 codex）
+        if is_bot_login(author):
+            if not is_actionable_review_bot_login(author):
+                continue
+        # 过滤人类作者：只保留 OWNER/MEMBER/COLLABORATOR 或当前用户
+        elif not is_trusted_human_review_author(item, authenticated_login):
+            continue
+        
+        # 去重：跳过已见过的项目
+        if item_id in seen_set:
+            continue
+            
+        new_items.append(item)
+```
 
-## 依赖与外部交互
+### 3.3 Agent 配置 (`openai.yaml`)
 
-### 运行时依赖
+```yaml
+interface:
+  display_name: "PR Babysitter"
+  short_description: "Watch PR CI, reviews, and merge conflicts"
+  default_prompt: "Babysit the current PR: monitor CI, reviewer comments, 
+                   and merge-conflict status (prefer the watcher's --watch mode 
+                   for live monitoring); fix valid issues, push updates, and 
+                   rerun flaky failures up to 3 times..."
+```
 
-- GitHub CLI：`babysit-pr` 强依赖 `gh`（无则报错）`gh_pr_watch.py:114-124`
-- Python 3：脚本 shebang 与命令示例依赖 `python3`
-- 本地文件系统：`/tmp` state 文件持久化
+### 3.4 启发式决策规则 (`heuristics.md`)
 
-### 与 core/skills 子系统耦合
+#### CI 失败分类
 
-- 技能结构契约：必须有 `SKILL.md`，可选 `agents/openai.yaml`
-- 技能配置依赖：
-  - `[skills.bundled]`、`[[skills.config]]`：`codex-rs/core/src/config/types.rs:813-831`
-- bundled system skills 与 repo skills 共存：
-  - system skills 安装目标 `$CODEX_HOME/skills/.system`：`codex-rs/skills/src/lib.rs:22,47`
+| 分类 | 特征 |
+|------|------|
+| **分支相关** | 编译/类型检查失败、lint 错误、确定性测试失败、快照变化、静态分析违规、构建脚本错误 |
+| **Flaky/无关** | DNS/网络超时、Runner 配置失败、GitHub Actions 基础设施错误、云服务限流、已知 flaky 测试 |
 
-### 与 app-server/协议交互
+#### 决策树
 
-- 客户端通过 `skills/list` 获取技能元信息、enabled 状态与错误列表。
-- 文件变更触发 `skills/changed`，客户端需自行重新拉取。
+```
+1. PR 已合并/关闭？→ 停止
+2. 有失败检查？
+   ├── 诊断日志
+   ├── 分支相关？→ 本地修复 → 提交 → 推送
+   ├── Flaky/无关？→ 重试失败任务
+   └── 检查仍在运行？→ 等待
+3. 重试次数超限？→ 停止并报告
+4. 处理新的 Review 评论
+```
 
-### 与仓库运维脚本交互
+---
 
-- `.ops/research_guard.sh` 会自动读取 checklist 首个 pending 项，拼装任务并用 `codex --yolo exec` 执行：`.ops/research_guard.sh:140-212`
-- `.ops/generate_daily_research_todo.sh` 从 checklist 生成当日待办：`.ops/generate_daily_research_todo.sh:15-42`
+## 四、关键代码路径与文件引用
 
-## 风险、边界与改进建议
+### 4.1 核心文件清单
 
-1. 测试覆盖边界
-- `gh_pr_watch.py` 当前未在仓库内发现直接自动化测试（仅有技能文本和参考文档）。
-- 建议：为脚本增加最小单测（参数解析、action 判定、state 文件并发/损坏处理）。
+| 文件路径 | 类型 | 行数 | 说明 |
+|---------|------|------|------|
+| `.codex/skills/babysit-pr/SKILL.md` | Markdown | 185 | 技能主文档，定义工作流、命令、规则 |
+| `.codex/skills/babysit-pr/agents/openai.yaml` | YAML | 4 | Agent 接口配置 |
+| `.codex/skills/babysit-pr/scripts/gh_pr_watch.py` | Python | 805 | 核心监控脚本 |
+| `.codex/skills/babysit-pr/references/heuristics.md` | Markdown | 58 | CI/Review 启发式规则 |
+| `.codex/skills/babysit-pr/references/github-api-notes.md` | Markdown | 72 | GitHub CLI/API 使用说明 |
+| `.codex/skills/test-tui/SKILL.md` | Markdown | 14 | TUI 测试指南 |
 
-2. 并发与状态文件冲突
-- 默认 state 文件按 repo+PR 固定命名，多个 watcher 并行执行同一 PR 时可能互相覆盖。
-- 建议：增加可选 session suffix 或文件锁策略。
+### 4.2 关键函数索引
 
-3. bot 过滤策略可能误判
-- action bot 判定依赖 `login` 包含 `codex` 关键词：`gh_pr_watch.py:30,455`。
-- 风险：漏掉合法 bot 或引入同名噪声 bot。
-- 建议：引入更明确 allowlist（可配置）与 repo 级策略。
+#### `gh_pr_watch.py`
 
-4. 信任模型与可见性
-- `.codex/config.toml` 在 untrusted project 中会被加载为 disabled layer，不会生效（但存在于栈中）。
-- 建议：在 CLI/TUI 明确展示“已发现但因信任策略禁用”的技能来源，降低排障成本。
+| 函数 | 行号 | 功能 |
+|------|------|------|
+| `parse_args()` | 55-94 | 参数解析 |
+| `resolve_pr()` | 157-192 | 解析 PR 规格（auto/number/url） |
+| `get_pr_checks()` | 265-276 | 获取 PR 检查状态 |
+| `summarize_checks()` | 285-302 | 汇总检查状态 |
+| `get_workflow_runs_for_sha()` | 305-316 | 获取指定 SHA 的工作流运行 |
+| `failed_runs_from_workflow_runs()` | 319-339 | 提取失败运行 |
+| `fetch_new_review_items()` | 468-524 | 获取新的 Review 项目 |
+| `recommend_actions()` | 572-598 | 推荐操作动作 |
+| `collect_snapshot()` | 601-649 | 收集完整快照 |
+| `retry_failed_now()` | 652-704 | 立即重试失败任务 |
+| `run_watch()` | 747-781 | 持续监控循环 |
+| `main()` | 784-801 | 入口函数 |
 
-5. `test-tui` 技能信息偏轻
-- 当前只有操作提示，无脚本化入口或验证 checklist。
-- 建议：补 `scripts/`（例如自动启动+消息注入+日志抓取）并在 `SKILL.md` 中声明。
+---
 
-6. 文档一致性风险
-- `SKILL.md`、`openai.yaml`、脚本实现三处需同步；目前主要依赖人工维护。
-- 建议：新增 CI lint（校验 `default_prompt` 与技能目标关键词、命令存在性、引用文件有效性）。
+## 五、依赖与外部交互
 
+### 5.1 外部依赖
+
+| 依赖 | 用途 | 必需 |
+|------|------|------|
+| `gh` (GitHub CLI) | 与 GitHub API 交互 | ✅ 必需 |
+| `python3` | 执行监控脚本 | ✅ 必需 |
+| Git 凭证 | 推送修复提交 | ⚠️ 条件 |
+
+### 5.2 GitHub API 端点
+
+```
+GET /repos/{owner}/{repo}/actions/runs?head_sha={sha}
+GET /repos/{owner}/{repo}/issues/{pr_number}/comments
+GET /repos/{owner}/{repo}/pulls/{pr_number}/comments
+GET /repos/{owner}/{repo}/pulls/{pr_number}/reviews
+POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun  # 通过 gh run rerun
+```
+
+### 5.3 状态文件存储
+
+```
+/tmp/codex-babysit-pr-{repo_slug}-pr{pr_number}.json
+```
+
+### 5.4 与 Kimi Code CLI 的集成
+
+`.codex/skills/` 目录是 Kimi Code CLI 的技能系统标准路径。当用户请求 "monitor PR"、"watch CI"、"babysit PR" 时，系统会：
+
+1. 加载 `.codex/skills/babysit-pr/SKILL.md` 获取技能定义
+2. 根据 `agents/openai.yaml` 配置 Agent 接口
+3. 执行 `scripts/gh_pr_watch.py` 进行实际监控
+4. 参考 `references/` 中的规则进行决策
+
+---
+
+## 六、风险、边界与改进建议
+
+### 6.1 已知风险
+
+| 风险 | 描述 | 缓解措施 |
+|------|------|----------|
+| **GitHub API 限流** | 高频轮询可能触发 rate limit | 自适应轮询退避 |
+| **权限不足** | `gh` 认证过期或权限不足 | 错误捕获并提示用户 |
+| **状态文件冲突** | 多个进程同时写入状态文件 | 原子写入（tempfile + os.replace） |
+| **误判 flaky** | 将真正的代码错误误判为 flaky | 启发式规则 + 人工确认 |
+| **无限循环** | 持续轮询不停止 | 严格的停止条件检查 |
+
+### 6.2 边界限制
+
+| 边界 | 说明 |
+|------|------|
+| **重试预算** | 每个 SHA 最多 3 次 flaky 重试（可配置） |
+| **Review 过滤** | 只处理 OWNER/MEMBER/COLLABORATOR/当前用户/特定 Bot 的评论 |
+| **轮询间隔** | 最小 30 秒，最大 1 小时（CI 通过后） |
+| **并发限制** | 同一 PR 不建议同时运行多个 `--watch` 进程 |
+
+### 6.3 改进建议
+
+#### 短期改进
+
+1. **Webhook 支持**
+   - 当前：主动轮询 GitHub API
+   - 建议：支持 GitHub Webhook 推送事件，减少 API 调用和延迟
+
+2. **更智能的 flaky 检测**
+   - 当前：基于启发式规则 + 重试计数
+   - 建议：引入历史数据分析，识别已知 flaky 测试模式
+
+3. **配置化**
+   - 当前：硬编码常量较多（如 `GREEN_STATE_MAX_POLL_SECONDS`）
+   - 建议：支持 `.codexrc` 或环境变量覆盖默认配置
+
+4. **通知机制**
+   - 当前：仅输出到 stdout
+   - 建议：支持 Slack/Email/桌面通知等外部通知渠道
+
+#### 中期改进
+
+5. **多 PR 监控**
+   - 当前：单进程单 PR
+   - 建议：支持同时监控多个 PR
+
+6. **自动合并**
+   - 当前：检测到就绪状态后停止
+   - 建议：可选的自动合并功能（需配置合并策略）
+
+7. **与 CI 系统深度集成**
+   - 当前：仅支持 GitHub Actions
+   - 建议：支持 CircleCI、Travis、Azure DevOps 等
+
+#### 长期改进
+
+8. **机器学习增强**
+   - 使用历史 PR 数据训练模型，更准确地预测 CI 失败原因
+   - 自动推荐修复方案
+
+9. **可视化 Dashboard**
+   - 提供 Web UI 展示 PR 状态、历史趋势、统计报告
+
+---
+
+## 七、附录
+
+### 7.1 命令速查表
+
+```bash
+# 一次性快照
+python3 .codex/skills/babysit-pr/scripts/gh_pr_watch.py --pr auto --once
+
+# 持续监控
+python3 .codex/skills/babysit-pr/scripts/gh_pr_watch.py --pr auto --watch
+
+# 立即重试失败任务
+python3 .codex/skills/babysit-pr/scripts/gh_pr_watch.py --pr auto --retry-failed-now
+
+# 指定 PR
+python3 .codex/skills/babysit-pr/scripts/gh_pr_watch.py --pr 123 --once
+```
+
+### 7.2 相关文档链接
+
+- 项目根目录 `AGENTS.md`: 项目级 Agent 指南
+- `docs/`: 项目文档目录
+- `.github/workflows/`: CI 工作流定义（被监控对象）
+
+---
+
+*文档生成时间: 2026-03-22*  
+*研究者: Kimi Code CLI*  
+*模型: k2.5*

@@ -1,362 +1,522 @@
-# DIR `.codex/skills/babysit-pr` 研究报告
-
-- 研究对象：`/home/sansha/Github/codex/.codex/skills/babysit-pr`
-- 研究日期：2026-03-19
-- 研究类型：目录级（DIR）深度研究
-
-## 场景与职责
-
-`babysit-pr` 是一个“持续值守 Pull Request”技能包，不是单次诊断脚本。它的职责是把“看一眼 CI 状态”升级为“持续跟进到终态（可合并/已关闭/需要人介入）”。
-
-该目录由 5 个部分协作构成：
-
-1. `SKILL.md`
-- 定义值守目标、严格 stop 条件、轮询节奏、review 与 flaky retry 的优先级、以及执行中的 git 安全规则。
-- 规定“监控任务默认使用 `--watch` 且不中断地持续消费输出”，强调“push 后必须在同一轮会话立即重启 watch”。
-
-2. `scripts/gh_pr_watch.py`
-- 提供可执行的状态归一化与动作建议能力，输出机器可读 JSON/JSONL。
-- 同时支持即时触发 failed jobs rerun（`--retry-failed-now`）。
-
-3. `references/heuristics.md`
-- 给出 CI 失败分类（branch-related vs flaky/unrelated）与 stop-and-ask 决策树。
-
-4. `references/github-api-notes.md`
-- 给出 watcher 依赖的 `gh` 命令与 API 字段映射，降低诊断时的命令漂移。
-
-5. `agents/openai.yaml`
-- 定义展示名、简述、默认提示词，确保 agent 侧行为与 `SKILL.md` 的“单 watcher + 持续轮询”一致。
-
-目录在系统中的位置是“技能实现层”：被 core skills 子系统加载并暴露给会话；实际执行中再由 `gh_pr_watch.py` 对接 GitHub CLI/API。
-
-## 功能点目的
-
-从目标目录视角，核心功能点与目的如下：
-
-1. PR 状态标准化快照（`--once`）
-- 把 PR 元数据、检查状态、失败 workflow run、review 增量、重试计数合并成一个统一 JSON 结构，供 agent 决策。
-
-2. 连续监控流（`--watch`）
-- 按轮询间隔持续产出 `snapshot` 事件，并在命中严格终态时输出 `stop` 事件后退出。
-- 在 CI 全绿且状态无变化时做指数退避，降低无效轮询频率。
-
-3. 失败重试执行（`--retry-failed-now`）
-- 在满足策略条件（当前 SHA、检查终态、未超预算）时仅 rerun failed jobs。
-- 记录每个 SHA 的重试次数，避免无限重试。
-
-4. Review 增量发现与去重
-- 聚合 issue comments / review comments / reviews 三路反馈。
-- 基于可信作者规则筛选，且通过 state 文件持久化“已见 comment/review ID”实现增量处理。
-
-5. 动作建议器（`actions`）
-- 输出 `process_review_comment`、`diagnose_ci_failure`、`retry_failed_checks`、`stop_*` 或 `idle`。
-- 将“是否该停、该修、该重试”从自然语言流程下沉为稳定机读协议。
-
-## 具体技术实现（关键流程/数据结构/协议/命令）
-
-### 1) 运行模式与参数协议
-
-脚本入口：`.codex/skills/babysit-pr/scripts/gh_pr_watch.py`
-
-参数解析由 `parse_args()` 完成，关键约束：
-
-- `--pr` 支持 `auto` / PR 编号 / PR URL。
-- 运行模式三选：
-  - `--once`
-  - `--watch`
-  - `--retry-failed-now`
-- `--watch` 与 `--retry-failed-now` 互斥。
-- 未显式指定模式时默认 `--once`。
-- `--max-flaky-retries` 默认 3，`--poll-seconds` 默认 30。
-
-### 2) PR 解析与仓库定位
-
-关键函数：
-
-- `parse_pr_spec()`：识别 `auto`、数字、URL。
-- `resolve_pr()`：
-  - 调 `gh pr view --json ...` 取 `number/url/state/head sha/mergeable/reviewDecision`。
-  - repo 解析优先级：
-    - `--repo` 显式值
-    - 从 PR URL 提取
-    - 从 `headRepository/headRepositoryOwner` 提取
-  - 统一输出 `pr` 对象，含 `merged/closed` 布尔值。
-
-### 3) 状态文件与去重模型
-
-默认 state 文件：`/tmp/codex-babysit-pr-<owner-repo>-pr<number>.json`
-
-持久化字段（核心）：
-
-- `retries_by_sha`：按 SHA 记录 flaky retry 次数。
-- `seen_issue_comment_ids` / `seen_review_comment_ids` / `seen_review_ids`：review 去重索引。
-- `last_seen_head_sha`、`last_snapshot_at`、`started_at`：监控会话状态。
-
-写入策略：
-
-- `save_state()` 使用临时文件 + `os.replace` 原子替换，减少写入中断导致的损坏窗口。
-
-### 4) 数据采集链路
-
-脚本通过 `gh_text()/gh_json()` 封装 CLI 调用，统一错误格式为 `GhCommandError`。
-
-采集链路：
-
-1. PR 元数据
-- `gh pr view --json number,url,state,mergedAt,closedAt,headRefName,headRefOid,headRepository,headRepositoryOwner,mergeable,mergeStateStatus,reviewDecision`
-
-2. PR checks 概览
-- `gh pr checks --json name,state,bucket,link,workflow,event,startedAt,completedAt`
-- `summarize_checks()` 计算 `pending_count/failed_count/passed_count/all_terminal`。
-
-3. Workflow runs（按 head SHA）
-- `gh api repos/{owner}/{repo}/actions/runs -X GET -f head_sha=<sha> -f per_page=100`
-- `failed_runs_from_workflow_runs()` 仅保留失败结论集合（`failure/timed_out/...`）。
-
-4. Review 三路聚合
-- issue comments：`repos/{repo}/issues/{pr}/comments`
-- inline review comments：`repos/{repo}/pulls/{pr}/comments`
-- review submissions：`repos/{repo}/pulls/{pr}/reviews`
-- `gh_api_list_paginated()` 自动分页。
-- 统一归一化后进入 `fetch_new_review_items()`。
-
-### 5) Review 过滤与可信作者策略
-
-过滤规则：
-
-- bot 账号仅允许“可行动 bot”（当前关键字包含 `codex`）。
-- 人类作者仅允许：
-  - 当前认证用户自己
-  - `OWNER/MEMBER/COLLABORATOR`
-- 非可信作者评论被忽略，不进入 `new_review_items`。
-
-这使 watcher 关注“更可能可执行”的反馈，但也意味着外部贡献者评论可能被过滤（详见风险章节）。
-
-### 6) 动作决策引擎
-
-核心函数：`recommend_actions(...)`
-
-决策优先级：
-
-1. PR 关闭/合并
-- 输出 `stop_pr_closed`（如有新 review 同时输出 `process_review_comment`）。
-
-2. Ready to merge
-- `is_pr_ready_to_merge()` 同时要求：
-  - checks 全终态且无失败无 pending
-  - 无 `new_review_items`
-  - `mergeable == MERGEABLE`
-  - `merge_state_status` 不在阻塞集合
-  - `review_decision` 不在阻塞集合
-- 满足则输出 `stop_ready_to_merge`。
-
-3. review 优先
-- 有新 review 则输出 `process_review_comment`。
-
-4. CI 失败处理
-- 失败且超重试预算：`stop_exhausted_retries`
-- 否则：`diagnose_ci_failure`
-- 若 checks 已终态且有 failed runs 且预算未超：附加 `retry_failed_checks`
-
-5. 无动作
-- 输出 `idle`。
-
-输出先经过 `unique_actions()` 去重。
-
-### 7) 即时重试执行逻辑
-
-`retry_failed_now()` 会先采样一次快照，然后按门槛判断：
-
-- PR 未关闭
-- `failed_count > 0`
-- 存在 failed runs
-- checks 已全终态
-- 当前 SHA 重试次数 < `max_flaky_retries`
-
-满足时对每个 run 执行：
-
-- `gh run rerun <run-id> --failed`
-
-成功后更新 state：
-
-- 当前 SHA 计数 `+1`
-- 返回 `rerun_attempted/rerun_count/rerun_run_ids/reason`
-
-### 8) Watch 事件协议与退避策略
-
-`run_watch()` 输出 JSONL 事件：
-
-- `{"event":"snapshot","payload":{snapshot,state_file,next_poll_seconds}}`
-- 命中 stop 动作后输出：
-  - `{"event":"stop","payload":{"actions":[...],"pr":{...}}}`
-
-轮询策略：
-
-- CI 非绿：间隔重置为基础 `--poll-seconds`
-- CI 绿且状态变化：重置为基础间隔
-- CI 绿且状态无变化：指数退避翻倍，封顶 3600 秒
-
-`snapshot_change_key()` 把 SHA、mergeability、reviewDecision、checks 计数、review item ID、actions 组合成“变化判据”。
-
-## 关键代码路径与文件引用
-
-目标目录关键文件：
-
-- `.codex/skills/babysit-pr/SKILL.md`
-- `.codex/skills/babysit-pr/agents/openai.yaml`
-- `.codex/skills/babysit-pr/scripts/gh_pr_watch.py`
-- `.codex/skills/babysit-pr/references/heuristics.md`
-- `.codex/skills/babysit-pr/references/github-api-notes.md`
-
-技能加载与调用方（上游）：
-
-- `codex-rs/core/src/skills/loader.rs`
-  - `skill_roots(...)`、`repo_agents_skill_roots(...)`
-  - `discover_skills_under_root(...)` 扫描 `SKILL.md`
-  - `load_skill_metadata(...)` 读取 `agents/openai.yaml`
-- `codex-rs/core/src/skills/manager.rs`
-  - `skills_for_config(...)`
-  - `skills_for_cwd_with_extra_user_roots(...)`
-  - cache 管理与 `bundled` 过滤
-- `codex-rs/core/src/skills/render.rs`
-  - `render_skills_section(...)` 将技能列表注入 instructions
-- `codex-rs/core/src/skills/injection.rs`
-  - `collect_explicit_skill_mentions(...)`
-  - `build_skill_injections(...)` 读取 `SKILL.md` 内容注入 turn
-- `codex-rs/core/src/codex.rs`
-  - turn 构建时解析 skill mentions 并注入
-  - `list_skills(...)` 对外返回技能清单
-
-与 app-server 的协议路径：
-
-- `codex-rs/app-server-protocol/src/protocol/v2.rs`
-  - `SkillsListParams/Response`
-  - `SkillsConfigWriteParams/Response`
-  - `SkillsChangedNotification`
-- `codex-rs/app-server/src/codex_message_processor.rs`
-  - `skills_config_write(...)` -> `ConfigEdit::SetSkillConfig`
-- `codex-rs/app-server/src/bespoke_event_handling.rs`
-  - `EventMsg::SkillsUpdateAvailable` -> `skills/changed` 通知
-- `codex-rs/app-server/README.md`
-  - `skills/list`、`skills/changed`、`skills/config/write` 使用示例
-
-文件变更监听链路（skills 热更新）：
-
-- `codex-rs/core/src/file_watcher.rs`
-  - 监听 skills roots 并广播 `FileWatcherEvent::SkillsChanged`
-- `codex-rs/core/src/thread_manager.rs`
-  - 收到变化后 `skills_manager.clear_cache()`
-- `codex-rs/core/src/codex.rs`
-  - 会话内转发 `EventMsg::SkillsUpdateAvailable`
-
-配置路径：
-
-- `codex-rs/core/src/config/types.rs`
-  - `SkillsConfig { bundled, config }`
-  - `SkillConfig { path, enabled }`
-- `codex-rs/core/src/config/edit.rs`
-  - `ConfigEdit::SetSkillConfig`
-  - `set_skill_config(...)` 写入/移除 `[[skills.config]]`
-
-测试路径（上下文系统级）：
-
-- `codex-rs/core/src/skills/loader_tests.rs`
-- `codex-rs/core/src/skills/manager_tests.rs`
-- `codex-rs/core/src/skills/injection_tests.rs`
-- `codex-rs/core/src/file_watcher_tests.rs`
-- `codex-rs/app-server/tests/suite/v2/skills_list.rs`
-
-注：目标目录 `babysit-pr` 本身（尤其 `gh_pr_watch.py`）当前未发现同仓库自动化单测。
-
-## 依赖与外部交互
-
-### 1) 运行时依赖
-
-- Python 3 运行脚本。
-- GitHub CLI `gh`（强依赖，缺失即报错）。
-- 本地文件系统（state 文件写入 `/tmp/...`）。
-
-### 2) 外部服务与协议
-
-- GitHub REST API（通过 `gh api` 间接调用）：
-  - PR comments / reviews
-  - Actions runs
-- GitHub Actions rerun 能力（`gh run rerun --failed`）。
-
-### 3) 与 Codex skill 基础设施的交互
-
-- 通过 `SKILL.md` frontmatter + `agents/openai.yaml` 被 loader 解析为 `SkillMetadata`。
-- 通过 explicit mentions 或技能注入机制进入 turn。
-- 通过 app-server 的 `skills/list` 对客户端可见，可被 `skills/config/write` 按路径启停。
-
-### 4) 文档与策略耦合
-
-- `SKILL.md` 是行为主规范。
-- `references/heuristics.md` 与 `references/github-api-notes.md` 是判定与命令面“辅助规范”。
-- `agents/openai.yaml.default_prompt` 与 `SKILL.md` 的约束高度耦合，形成运行时提示对齐。
-
-## 风险、边界与改进建议
-
-### 风险
-
-1. 文档与脚本默认轮询间隔存在偏差
-- `SKILL.md` 描述“未绿时 1 分钟轮询”，脚本 `--poll-seconds` 默认是 30 秒。
-- 风险是技能执行者按文档理解与脚本默认行为不一致，影响 API 频率与预期节奏。
-
-2. `gh_pr_watch.py` 缺少仓库内自动化测试
-- 动作决策与筛选规则较复杂（stop 条件、review 过滤、retry 预算），回归风险高于普通脚本。
-
-3. 默认 state 文件缺少并发锁
-- 同 PR 并发 watcher 会共享同一 `/tmp/...` 文件，可能造成 seen IDs 或 retry 计数互相覆盖。
-
-4. Review 信任模型较保守
-- 仅允许 OWNER/MEMBER/COLLABORATOR + 特定 bot。
-- 对开源场景下外部贡献者（如 `CONTRIBUTOR`）的有效评论可能漏报。
-
-5. 失败分类结果未结构化落盘
-- 当前 `actions` 仅提示“该诊断/该重试”，但未输出脚本级“分类理由字段”，不利于后续审计与统计。
-
-### 边界
-
-1. watcher 不负责自动 merge PR
-- “ready_to_merge” 只给 stop 建议，不执行合并动作。
-
-2. watcher 不直接改代码
-- 脚本只做状态与 rerun，代码修复、commit/push 由执行该 skill 的 agent 负责。
-
-3. review“已解决线程”语义不在脚本内完整判定
-- 当前主要基于评论流 + seen IDs 去重，不等价于线程级 resolved 状态机。
-
-4. 对 GitHub 权限与网络可用性有前置依赖
-- `gh` 认证失败、仓库权限不足或 GitHub 故障时只能停并上报，无法自治恢复。
-
-### 改进建议
-
-1. 增加 watcher 单测与快照样例
-- 至少覆盖：
-  - `recommend_actions()` 分支矩阵
-  - `retry_failed_now()` 门槛矩阵
-  - review 过滤规则与去重
-  - green-state 退避逻辑
-
-2. 引入 state 文件锁或会话隔离
-- 可选：
-  - 文件锁（flock）
-  - state 文件名附加会话 ID
-  - 或检测并拒绝同 PR 并发 watcher
-
-3. 对齐文档与默认参数
-- 二选一：
-  - 将默认 `--poll-seconds` 改到 60
-  - 或在 `SKILL.md` 明确默认 30 秒并解释原因
-
-4. 扩展 review 信任策略配置化
-- 把可信 association / bot allowlist 下沉到配置项，避免写死在脚本常量。
-
-5. 输出更可审计的判定字段
-- 在 snapshot 增加结构化字段，如：
-  - `ci_failure_classification`
-  - `classification_reason`
-  - `review_filter_stats`
-  便于后续自动汇总与行为回放。
-
+# babysit-pr Skill 深度研究文档
+
+## 1. 场景与职责
+
+### 1.1 核心场景
+
+`babysit-pr` 是一个 Kimi CLI Skill，用于**自动化监控和协助 GitHub Pull Request 的生命周期管理**。它解决的核心问题是：开发者在提交 PR 后需要持续关注 CI 状态、审查反馈、合并冲突等，这个过程繁琐且耗时。
+
+### 1.2 职责边界
+
+该 Skill 的职责包括：
+
+| 职责领域 | 具体内容 |
+|---------|---------|
+| **CI 监控** | 持续轮询 PR 的 CI checks 状态，检测失败、挂起或成功 |
+| **失败诊断** | 分析 CI 失败原因，区分"分支相关失败"vs" flaky/基础设施失败" |
+| **自动修复** | 对分支相关失败自动本地修复、提交并推送 |
+| **审查反馈处理** | 监控 PR 评论、行内审查评论、审查提交，识别可操作的反馈 |
+| **Flaky 重试** | 对 flaky 失败自动重试（默认最多 3 次） |
+| **合并就绪检测** | 检测 PR 是否满足合并条件（CI 通过 + 无未处理审查 + 可合并） |
+
+### 1.3 终端状态定义
+
+Skill 在以下情况会停止监控：
+1. PR 被合并或关闭
+2. PR 完全就绪（CI 通过 + 审查清理完毕 + 可合并 + 无阻塞审查决策）
+3. 需要用户介入（基础设施问题、重试预算耗尽、权限问题、模糊情况）
+
+---
+
+## 2. 功能点目的
+
+### 2.1 功能模块划分
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    babysit-pr Skill                         │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │  PR 解析器   │  │  CI 监控器   │  │   审查反馈处理器     │  │
+│  │  (resolve)  │  │  (checks)   │  │   (review items)    │  │
+│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
+│         │                │                    │             │
+│         └────────────────┼────────────────────┘             │
+│                          ▼                                  │
+│              ┌─────────────────────┐                        │
+│              │    决策引擎 (recommend_actions)              │
+│              └──────────┬──────────┘                        │
+│                         ▼                                   │
+│              ┌─────────────────────┐                        │
+│              │   动作执行器 (actions)  │                     │
+│              │  - diagnose_ci_failure│                     │
+│              │  - retry_failed_checks│                     │
+│              │  - process_review_comment                   │
+│              └─────────────────────┘                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 各功能点详细目的
+
+#### 2.2.1 PR 解析 (`resolve_pr`)
+- **目的**：支持多种 PR 标识方式（auto/number/URL），统一解析为内部结构
+- **输入**：`--pr auto` 或 PR 号或 PR URL
+- **输出**：标准化的 PR 信息字典（含 repo、head_sha、branch、state 等）
+
+#### 2.2.2 CI 状态聚合 (`get_pr_checks` + `summarize_checks`)
+- **目的**：将 GitHub 分散的 check 数据聚合为可决策的摘要
+- **关键指标**：pending_count、failed_count、passed_count、all_terminal
+
+#### 2.2.3 Workflow Run 追踪 (`get_workflow_runs_for_sha`)
+- **目的**：获取与当前 head SHA 关联的所有 workflow runs，用于后续重试
+- **API**：`repos/{owner}/{repo}/actions/runs?head_sha={sha}`
+
+#### 2.2.4 审查反馈去重 (`fetch_new_review_items`)
+- **目的**：只向 Agent 报告"新的"审查反馈，避免重复处理
+- **状态管理**：通过 `seen_issue_comment_ids`、`seen_review_comment_ids`、`seen_review_ids` 追踪
+
+#### 2.2.5 智能决策 (`recommend_actions`)
+- **目的**：根据当前状态推荐下一步动作
+- **输出 actions 列表**：
+  - `idle`：等待中
+  - `diagnose_ci_failure`：需要诊断 CI 失败
+  - `retry_failed_checks`：可以重试 flaky 失败
+  - `process_review_comment`：有新审查反馈待处理
+  - `stop_pr_closed`：PR 已关闭，停止
+  - `stop_ready_to_merge`：PR 就绪，停止
+  - `stop_exhausted_retries`：重试预算耗尽，停止
+
+#### 2.2.6 自适应轮询 (`run_watch`)
+- **目的**：在 CI 未通过时高频轮询（1分钟），CI 通过后指数退避（最高1小时）
+- **触发重置**：SHA 变化、check 状态变化、新审查评论、合并状态变化
+
+---
+
+## 3. 具体技术实现
+
+### 3.1 关键流程
+
+#### 3.1.1 主监控循环 (`run_watch`)
+
+```python
+def run_watch(args):
+    poll_seconds = args.poll_seconds  # 默认 30s
+    last_change_key = None
+    while True:
+        snapshot, state_path = collect_snapshot(args)  # 采集状态
+        print_event("snapshot", {...})  # 输出 JSONL 事件
+        
+        actions = set(snapshot.get("actions") or [])
+        if 有终止动作:
+            print_event("stop", {...})
+            return 0
+        
+        # 自适应调整轮询间隔
+        if not green:
+            poll_seconds = args.poll_seconds  # 重置为 1m
+        elif changed:
+            poll_seconds = args.poll_seconds  # 有变化，重置
+        else:
+            poll_seconds = min(poll_seconds * 2, GREEN_STATE_MAX_POLL_SECONDS)  # 指数退避
+        
+        time.sleep(poll_seconds)
+```
+
+#### 3.1.2 状态采集流程 (`collect_snapshot`)
+
+```python
+def collect_snapshot(args):
+    pr = resolve_pr(args.pr, repo_override=args.repo)
+    state, fresh_state = load_state(state_path)
+    
+    checks = get_pr_checks(str(pr["number"]), repo=pr["repo"])
+    checks_summary = summarize_checks(checks)
+    
+    workflow_runs = get_workflow_runs_for_sha(pr["repo"], pr["head_sha"])
+    failed_runs = failed_runs_from_workflow_runs(workflow_runs, pr["head_sha"])
+    
+    authenticated_login = get_authenticated_login()
+    new_review_items = fetch_new_review_items(pr, state, fresh_state, authenticated_login)
+    
+    retries_used = current_retry_count(state, pr["head_sha"])
+    actions = recommend_actions(pr, checks_summary, failed_runs, new_review_items, retries_used, args.max_flaky_retries)
+    
+    save_state(state_path, state)  # 持久化 seen IDs 等
+    return snapshot, state_path
+```
+
+#### 3.1.3 Flaky 重试流程 (`retry_failed_now`)
+
+```python
+def retry_failed_now(args):
+    snapshot, state_path = collect_snapshot(args)
+    
+    # 前置检查
+    if pr["closed"] or pr["merged"]: return {"reason": "pr_closed"}
+    if checks_summary["failed_count"] <= 0: return {"reason": "no_failed_pr_checks"}
+    if not checks_summary["all_terminal"]: return {"reason": "checks_still_pending"}
+    if retries_used >= max_retries: return {"reason": "retry_budget_exhausted"}
+    
+    # 执行重试
+    for run in failed_runs:
+        gh_text(["run", "rerun", str(run_id), "--failed"], repo=pr["repo"])
+    
+    # 更新重试计数
+    set_retry_count(state, pr["head_sha"], current_retry_count(state, pr["head_sha"]) + 1)
+    save_state(state_path, state)
+```
+
+### 3.2 核心数据结构
+
+#### 3.2.1 PR 信息结构
+
+```python
+{
+    "number": int,
+    "url": str,
+    "repo": "OWNER/REPO",
+    "head_sha": str,
+    "head_branch": str,
+    "state": str,
+    "merged": bool,
+    "closed": bool,
+    "mergeable": "MERGEABLE" | "CONFLICTING" | "UNKNOWN",
+    "merge_state_status": str,
+    "review_decision": "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | ""
+}
+```
+
+#### 3.2.2 Checks 摘要结构
+
+```python
+{
+    "pending_count": int,
+    "failed_count": int,
+    "passed_count": int,
+    "all_terminal": bool  # 是否所有 checks 都已结束（无 pending）
+}
+```
+
+#### 3.2.3 审查反馈项结构
+
+```python
+{
+    "kind": "issue_comment" | "review_comment" | "review",
+    "id": str,
+    "author": str,
+    "author_association": "OWNER" | "MEMBER" | "COLLABORATOR" | "CONTRIBUTOR" | ...,
+    "created_at": str,
+    "body": str,
+    "path": str | None,      # 文件路径（仅 review_comment）
+    "line": int | None,      # 行号（仅 review_comment）
+    "url": str
+}
+```
+
+#### 3.2.4 状态文件结构
+
+```python
+{
+    "pr": {"repo": str, "number": int},
+    "started_at": int,           # 首次监控时间戳
+    "last_seen_head_sha": str,   # 上次看到的 SHA
+    "retries_by_sha": {          # 每个 SHA 的重试次数
+        "sha1": 2,
+        "sha2": 1
+    },
+    "seen_issue_comment_ids": [str],    # 已处理的 issue comment IDs
+    "seen_review_comment_ids": [str],   # 已处理的 review comment IDs
+    "seen_review_ids": [str],           # 已处理的 review IDs
+    "last_snapshot_at": int
+}
+```
+
+#### 3.2.5 Snapshot 输出结构
+
+```python
+{
+    "pr": {...},
+    "checks": {...},
+    "failed_runs": [...],
+    "new_review_items": [...],
+    "actions": ["diagnose_ci_failure", "retry_failed_checks", ...],
+    "retry_state": {
+        "current_sha_retries_used": int,
+        "max_flaky_retries": int
+    }
+}
+```
+
+### 3.3 协议与命令
+
+#### 3.3.1 命令行接口
+
+| 命令 | 用途 |
+|-----|------|
+| `--pr auto` | 从当前分支推断 PR |
+| `--pr <number>` | 指定 PR 号 |
+| `--pr <url>` | 指定 PR URL |
+| `--once` | 单次快照，输出 JSON |
+| `--watch` | 持续监控，输出 JSONL 流 |
+| `--retry-failed-now` | 立即重试失败的 checks |
+| `--poll-seconds 30` | 轮询间隔（默认 30s） |
+| `--max-flaky-retries 3` | 最大重试次数 |
+| `--state-file <path>` | 自定义状态文件路径 |
+
+#### 3.3.2 输出协议
+
+**单次模式 (`--once`)**：
+```json
+{
+  "pr": {...},
+  "checks": {...},
+  "failed_runs": [...],
+  "new_review_items": [...],
+  "actions": [...],
+  "retry_state": {...},
+  "state_file": "/tmp/codex-babysit-pr-..."
+}
+```
+
+**持续模式 (`--watch`)**：JSON Lines 流
+```jsonl
+{"event": "snapshot", "payload": {"snapshot": {...}, "state_file": "...", "next_poll_seconds": 30}}
+{"event": "snapshot", "payload": {...}}
+{"event": "stop", "payload": {"actions": [...], "pr": {...}}}
+```
+
+**重试模式 (`--retry-failed-now`)**：
+```json
+{
+  "snapshot": {...},
+  "state_file": "...",
+  "rerun_attempted": true,
+  "rerun_count": 2,
+  "rerun_run_ids": [123456, 123457],
+  "reason": "rerun_triggered"
+}
+```
+
+### 3.4 GitHub API 调用
+
+| 用途 | 命令/端点 |
+|-----|----------|
+| PR 元数据 | `gh pr view --json number,url,state,mergedAt,closedAt,headRefName,headRefOid,...` |
+| PR Checks | `gh pr checks --json name,state,bucket,link,workflow,event,startedAt,completedAt` |
+| Workflow Runs | `gh api repos/{owner}/{repo}/actions/runs -f head_sha={sha} -f per_page=100` |
+| Issue Comments | `gh api repos/{owner}/{repo}/issues/{pr_number}/comments?per_page=100` |
+| Review Comments | `gh api repos/{owner}/{repo}/pulls/{pr_number}/comments?per_page=100` |
+| Reviews | `gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page=100` |
+| 重试失败 Jobs | `gh run rerun {run_id} --failed` |
+| 当前用户 | `gh api user` |
+
+---
+
+## 4. 关键代码路径与文件引用
+
+### 4.1 文件结构
+
+```
+.codex/skills/babysit-pr/
+├── SKILL.md                          # Skill 定义和使用指南
+├── agents/
+│   └── openai.yaml                   # Agent 接口定义（display_name, prompt）
+├── references/
+│   ├── github-api-notes.md           # GitHub CLI/API 使用笔记
+│   └── heuristics.md                 # CI 分类启发式规则
+└── scripts/
+    └── gh_pr_watch.py                # 核心实现（805 行）
+```
+
+### 4.2 核心代码路径
+
+#### 4.2.1 入口与参数解析
+- **文件**：`.codex/skills/babysit-pr/scripts/gh_pr_watch.py`
+- **函数**：`parse_args()` (L55-94)
+- **入口**：`main()` (L784-805)
+
+#### 4.2.2 PR 解析
+- **函数**：`resolve_pr()` (L157-192)
+- **辅助**：`parse_pr_spec()` (L135-143), `extract_repo_from_pr_url()` (L214-219), `extract_repo_from_pr_view()` (L195-213)
+
+#### 4.2.3 CI 监控
+- **函数**：`get_pr_checks()` (L265-276), `summarize_checks()` (L285-302)
+- **Workflow**：`get_workflow_runs_for_sha()` (L305-316), `failed_runs_from_workflow_runs()` (L319-339)
+- **判断**：`is_pending_check()` (L279-282), `is_ci_green()` (L716-722)
+
+#### 4.2.4 审查反馈处理
+- **函数**：`fetch_new_review_items()` (L468-524)
+- **标准化**：`normalize_issue_comments()` (L375-393), `normalize_review_comments()` (L396-417), `normalize_reviews()` (L420-438)
+- **信任判断**：`is_trusted_human_review_author()` (L458-465), `is_actionable_review_bot_login()` (L451-455)
+
+#### 4.2.5 决策引擎
+- **函数**：`recommend_actions()` (L572-598)
+- **就绪判断**：`is_pr_ready_to_merge()` (L554-569)
+
+#### 4.2.6 状态管理
+- **加载**：`load_state()` (L222-240)
+- **保存**：`save_state()` (L243-258)
+- **默认路径**：`default_state_file_for()` (L260-262)
+- **重试计数**：`current_retry_count()` (L527-533), `set_retry_count()` (L536-541)
+
+#### 4.2.7 主循环
+- **单次采集**：`collect_snapshot()` (L601-649)
+- **持续监控**：`run_watch()` (L747-781)
+- **重试执行**：`retry_failed_now()` (L652-704)
+
+### 4.3 关键常量定义
+
+```python
+# L15-48
+FAILED_RUN_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale"}
+PENDING_CHECK_STATES = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"}
+REVIEW_BOT_LOGIN_KEYWORDS = {"codex"}  # 信任包含 "codex" 的 bot
+TRUSTED_AUTHOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+MERGE_BLOCKING_REVIEW_DECISIONS = {"REVIEW_REQUIRED", "CHANGES_REQUESTED"}
+MERGE_CONFLICT_OR_BLOCKING_STATES = {"BLOCKED", "DIRTY", "DRAFT", "UNKNOWN"}
+GREEN_STATE_MAX_POLL_SECONDS = 60 * 60  # 1小时
+```
+
+---
+
+## 5. 依赖与外部交互
+
+### 5.1 外部依赖
+
+| 依赖 | 用途 | 必需 |
+|-----|------|-----|
+| `gh` (GitHub CLI) | 所有 GitHub 操作 | 是 |
+| Python 3 | 脚本运行环境 | 是 |
+| `/tmp` 目录 | 状态文件存储 | 是（可自定义） |
+
+### 5.2 GitHub CLI 命令依赖
+
+脚本通过 `gh_text()` 和 `gh_json()` 函数封装所有 `gh` 调用：
+
+```python
+def gh_text(args, repo=None):
+    cmd = ["gh"]
+    if repo and (not args or args[0] != "api"):
+        cmd.extend(["-R", repo])
+    cmd.extend(args)
+    # ...
+```
+
+### 5.3 状态文件持久化
+
+- **默认路径**：`/tmp/codex-babysit-pr-{repo_slug}-pr{pr_number}.json`
+- **格式**：JSON，包含 seen IDs、重试计数、时间戳
+- **原子写入**：使用临时文件 + `os.replace()` 保证原子性
+
+### 5.4 Agent 集成
+
+通过 `agents/openai.yaml` 定义 Agent 接口：
+
+```yaml
+interface:
+  display_name: "PR Babysitter"
+  short_description: "Watch PR CI, reviews, and merge conflicts"
+  default_prompt: "Babysit the current PR: monitor CI, reviewer comments..."
+```
+
+Agent 通过执行 Python 脚本并解析 JSON/JSONL 输出与 Skill 交互。
+
+---
+
+## 6. 风险、边界与改进建议
+
+### 6.1 已知风险
+
+#### 6.1.1 状态文件冲突
+- **风险**：多个进程同时监控同一 PR 可能导致状态文件竞争
+- **现状**：脚本未实现文件锁，依赖用户不并发执行
+- **缓解**：文档建议"保持单个 watcher 会话"
+
+#### 6.1.2 GitHub API 限制
+- **风险**：大规模仓库的 review comments 可能超过 100 条/页限制
+- **现状**：使用分页但未实现 rate limit 处理
+- **代码位置**：`gh_api_list_paginated()` (L357-372)
+
+#### 6.1.3 认证过期
+- **风险**：`gh` 认证过期会导致所有 API 调用失败
+- **处理**：抛出 `GhCommandError`，Agent 需处理此错误
+
+#### 6.1.4 Bot 评论误判
+- **风险**：`REVIEW_BOT_LOGIN_KEYWORDS = {"codex"}` 可能漏判或误判
+- **示例**：`some-other-codex-bot[bot]` 会被信任，但 `openai-bot[bot]` 不会
+
+### 6.2 边界情况
+
+| 场景 | 当前行为 |
+|-----|---------|
+| PR 被关闭后重新打开 | 视为新 PR，状态文件保留但会检测 state 变化 |
+| Force push 后 SHA 变化 | `last_seen_head_sha` 检测变化，重试计数重置 |
+| 审查评论被标记为 resolved | 脚本不追踪 resolved 状态，依赖 Agent 判断 |
+| 新状态文件首次运行 | 所有现有 pending 评论都会被视为"新"（ intentional 设计） |
+| 无 failed runs 但有 failed checks | `retry_failed_now` 返回 `"reason": "no_failed_runs"` |
+
+### 6.3 改进建议
+
+#### 6.3.1 高优先级
+
+1. **添加文件锁机制**
+   ```python
+   import fcntl  # Unix
+   # 或 portalocker 跨平台
+   ```
+   防止同一 PR 的多 watcher 竞争。
+
+2. **Rate Limit 处理**
+   ```python
+   # 在 gh_json 中添加 403/429 重试逻辑
+   if err.returncode == 403 or err.returncode == 429:
+       # 读取 Retry-After header，指数退避
+   ```
+
+3. **Resolved 评论追踪**
+   当前脚本不区分 resolved/unresolved review comments，建议：
+   - 调用 `repos/{owner}/{repo}/pulls/{pr_number}/comments` 时包含 `?since=` 或检查 `resolved` 字段
+
+#### 6.3.2 中优先级
+
+4. **更智能的 Bot 检测**
+   ```python
+   # 可配置的信任 bot 列表
+   TRUSTED_BOTS = {"codex", "openai", "github-actions"}
+   ```
+
+5. **状态文件压缩/轮转**
+   长期监控同一 PR 可能导致状态文件累积大量 seen IDs。
+
+6. **WebSocket/Webhook 支持**
+   当前轮询模式效率较低，可考虑 GitHub Webhook 或 GraphQL Subscriptions（需要服务器支持）。
+
+#### 6.3.3 低优先级
+
+7. **Metrics 导出**
+   输出监控时长、重试次数、发现的问题数等指标。
+
+8. **多 PR 监控**
+   当前设计为单 PR，扩展为多 PR 需要重新设计状态文件结构。
+
+### 6.4 测试建议
+
+当前脚本无单元测试，建议添加：
+
+1. **Mock `gh` 命令** 的单元测试框架
+2. **状态文件读写** 的边界测试
+3. **决策逻辑表** 的完整覆盖测试
+4. **分页逻辑** 的大数据量测试
+
+---
+
+## 7. 总结
+
+`babysit-pr` 是一个设计精良的 PR 监控 Skill，通过清晰的职责分离（采集→决策→执行）和健壮的状态管理，实现了自动化的 PR 生命周期管理。其核心优势在于：
+
+1. **自适应轮询**：平衡实时性和资源消耗
+2. **智能去重**：避免重复处理相同的审查反馈
+3. **Flaky 容忍**：自动重试机制减少人工干预
+4. **安全边界**：明确的停止条件和用户介入点
+
+主要改进空间在于并发安全（文件锁）、API 限制处理和更精细的审查评论状态追踪。

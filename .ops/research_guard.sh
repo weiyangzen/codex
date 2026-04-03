@@ -23,7 +23,7 @@ CLAIM_LOCK_FILE="/tmp/${PROJECT}_research_guard.claim.lock"
 WRITE_LOCK_FILE="/tmp/${PROJECT}_research_guard.write.lock"
 CLAIMS_DIR="$LOG_DIR/research_claims"
 CHECKLIST_FILE="$REPO/Docs/researches/blueprint_checklist.md"
-AUTO_CLEANUP_ON_COMPLETE="${AUTO_CLEANUP_ON_COMPLETE:-0}"
+AUTO_CLEANUP_ON_COMPLETE="${AUTO_CLEANUP_ON_COMPLETE:-1}"
 KIMI_EXEC_TIMEOUT_SECONDS="${KIMI_EXEC_TIMEOUT_SECONDS:-1200}"
 AUTO_PUSH_ON_CHECKPOINT="${AUTO_PUSH_ON_CHECKPOINT:-0}"
 MAX_BATCH_BYTES="${MAX_BATCH_BYTES:-102400}"
@@ -37,6 +37,10 @@ KIMI_BASE_URL="${KIMI_BASE_URL:-https://api.kimi.com/coding/v1}"
 KIMI_KEYS_FILE="${KIMI_KEYS_FILE:-$HOME/kimi_keys.txt}"
 KIMI_KEY_INDEX_FILE="$LOG_DIR/research_guard.kimi_key_index"
 CLAIM_TTL_SECONDS="${CLAIM_TTL_SECONDS:-7200}"
+FEISHU_TARGET="${FEISHU_TARGET:-ou_e755ee2d1c010c9628f838183405e724}"
+FEISHU_ACCOUNT="${FEISHU_ACCOUNT:-default}"
+NOTIFY_EVERY_SUCCESS_BATCHES="${NOTIFY_EVERY_SUCCESS_BATCHES:-10}"
+PROGRESS_STATE_FILE="$LOG_DIR/research_guard.progress"
 
 mkdir -p "$LOG_DIR" "$REPO/Docs/researches" "$CLAIMS_DIR"
 
@@ -44,6 +48,125 @@ TS_NOW() { date '+%F %T %z'; }
 log() { echo "[$(TS_NOW)] $*" >> "$LOG_FILE"; }
 set_state() { printf '%s\n' "$1" > "$STATE_FILE"; }
 set_block() { printf '%s\n' "$1" > "$BLOCK_FILE"; }
+
+notify_feishu() {
+  local message="$1"
+  if ! command -v openclaw >/dev/null 2>&1; then
+    log "warn: openclaw CLI not found, cannot send Feishu alert"
+    return 1
+  fi
+
+  if timeout 20 openclaw message send \
+    --channel feishu \
+    --account "$FEISHU_ACCOUNT" \
+    --target "$FEISHU_TARGET" \
+    --message "$message" >/dev/null 2>&1; then
+    log "feishu alert sent to $FEISHU_TARGET"
+    return 0
+  fi
+
+  if timeout 20 openclaw message send \
+    --channel feishu \
+    --target "$FEISHU_TARGET" \
+    --message "$message" >/dev/null 2>&1; then
+    log "feishu alert sent to $FEISHU_TARGET (without account override)"
+    return 0
+  fi
+
+  log "warn: failed to send Feishu alert to $FEISHU_TARGET"
+  return 1
+}
+
+load_progress_state() {
+  LAST_SEEN_HEAD=""
+  TOTAL_SUCCESS_BATCHES=0
+  LAST_NOTIFIED_BATCH_MILESTONE=0
+
+  if [[ -f "$PROGRESS_STATE_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$PROGRESS_STATE_FILE"
+  fi
+
+  [[ "$TOTAL_SUCCESS_BATCHES" =~ ^[0-9]+$ ]] || TOTAL_SUCCESS_BATCHES=0
+  [[ "$LAST_NOTIFIED_BATCH_MILESTONE" =~ ^[0-9]+$ ]] || LAST_NOTIFIED_BATCH_MILESTONE=0
+}
+
+save_progress_state() {
+  {
+    printf 'LAST_SEEN_HEAD=%q\n' "${LAST_SEEN_HEAD:-}"
+    printf 'TOTAL_SUCCESS_BATCHES=%q\n' "${TOTAL_SUCCESS_BATCHES:-0}"
+    printf 'LAST_NOTIFIED_BATCH_MILESTONE=%q\n' "${LAST_NOTIFIED_BATCH_MILESTONE:-0}"
+  } > "$PROGRESS_STATE_FILE"
+}
+
+read_research_checklist_counts() {
+  python3 - "$CHECKLIST_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+done = 0
+open_ = 0
+if path.exists():
+    for line in path.read_text().splitlines():
+        s = line.lstrip()
+        if s.startswith(('- [x]', '* [x]', '- [X]', '* [X]')):
+            done += 1
+        elif s.startswith(('- [ ]', '* [ ]')):
+            open_ += 1
+print(f"{done} {open_} {done + open_}")
+PY
+}
+
+record_research_batch_progress() {
+  local current_head new_batches next_milestone counts done_count open_count total_count
+
+  if ! [[ "$NOTIFY_EVERY_SUCCESS_BATCHES" =~ ^[0-9]+$ ]] || (( NOTIFY_EVERY_SUCCESS_BATCHES < 1 )); then
+    return 0
+  fi
+
+  current_head="$(git rev-parse HEAD 2>/dev/null || true)"
+  [[ -n "$current_head" ]] || return 0
+
+  load_progress_state
+
+  if [[ -z "$LAST_SEEN_HEAD" ]]; then
+    LAST_SEEN_HEAD="$current_head"
+    save_progress_state
+    return 0
+  fi
+
+  if [[ "$LAST_SEEN_HEAD" == "$current_head" ]]; then
+    return 0
+  fi
+
+  if git cat-file -e "${LAST_SEEN_HEAD}^{commit}" >/dev/null 2>&1; then
+    new_batches="$(git rev-list --count --grep='^docs\\(research\\): ' "${LAST_SEEN_HEAD}..${current_head}" 2>/dev/null || echo 0)"
+  else
+    new_batches=0
+  fi
+
+  [[ "$new_batches" =~ ^[0-9]+$ ]] || new_batches=0
+  if (( new_batches > 0 )); then
+    TOTAL_SUCCESS_BATCHES=$((TOTAL_SUCCESS_BATCHES + new_batches))
+  fi
+  LAST_SEEN_HEAD="$current_head"
+
+  counts="$(read_research_checklist_counts)"
+  read -r done_count open_count total_count <<< "$counts"
+  [[ "$done_count" =~ ^[0-9]+$ ]] || done_count=0
+  [[ "$open_count" =~ ^[0-9]+$ ]] || open_count=0
+  [[ "$total_count" =~ ^[0-9]+$ ]] || total_count=0
+
+  next_milestone=$((LAST_NOTIFIED_BATCH_MILESTONE + NOTIFY_EVERY_SUCCESS_BATCHES))
+  while (( TOTAL_SUCCESS_BATCHES >= next_milestone )); do
+    notify_feishu "[${PROJECT}] 研究型 cron 已累计成功完成 ${next_milestone} 个研究批次。当前进度 ${done_count}/${total_count}，剩余 ${open_count}。"
+    LAST_NOTIFIED_BATCH_MILESTONE="$next_milestone"
+    next_milestone=$((LAST_NOTIFIED_BATCH_MILESTONE + NOTIFY_EVERY_SUCCESS_BATCHES))
+  done
+
+  save_progress_state
+}
 
 trim() {
   local s="$1"
@@ -250,7 +373,9 @@ run_research_with_kimi() {
       ) || rc=$?
     fi
 
-    if [[ "$rc" -eq 0 ]] && grep -Eqi 'LLM not set|AUTH_REQUIRED|auth required|invalid api key|quota|insufficient quota|rate limit|401|403' "$attempt_log"; then
+    # Guard against silent auth/quota failures from kimi output.
+    # Avoid bare "401|403" matching to prevent false positives from normal prose/line numbers.
+    if [[ "$rc" -eq 0 ]] && grep -Eqi 'LLM not set|AUTH_REQUIRED|auth required|invalid api key|insufficient quota|rate limit|access_terminated_error|quota will be refreshed|usage limit for this billing cycle|error code:[[:space:]]*40[13]' "$attempt_log"; then
       rc=65
       log "warn: kimi output indicates auth/model error despite zero exit; rotating key"
     fi
@@ -376,6 +501,51 @@ file_report_path() {
   else
     printf '%s/Docs/researches/%s/%s_research.md' "$REPO" "$d" "$b"
   fi
+}
+
+item_report_path() {
+  local type="$1"
+  local path="$2"
+  if [[ "$type" == "DIR" ]]; then
+    dir_report_path "$path"
+  else
+    file_report_path "$path"
+  fi
+}
+
+reconcile_checklist_with_existing_reports() {
+  local tmp_file line type path report auto_done changed
+  auto_done=0
+  changed=0
+
+  [[ -f "$CHECKLIST_FILE" ]] || {
+    echo "0"
+    return 0
+  }
+
+  tmp_file="$(mktemp "$LOG_DIR/checklist.reconcile.${PROJECT}.XXXXXX.md")"
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^-\ \[\ \]\ \[(DIR|FILE)\]\ (.+)$ ]]; then
+      type="${BASH_REMATCH[1]}"
+      path="${BASH_REMATCH[2]}"
+      report="$(item_report_path "$type" "$path")"
+      if [[ -s "$report" ]]; then
+        line="- [x] [${type}] ${path}"
+        auto_done=$((auto_done + 1))
+        changed=1
+      fi
+    fi
+    printf '%s\n' "$line" >> "$tmp_file"
+  done < "$CHECKLIST_FILE"
+
+  if (( changed == 1 )); then
+    mv "$tmp_file" "$CHECKLIST_FILE"
+  else
+    rm -f "$tmp_file"
+  fi
+
+  echo "$auto_done"
 }
 
 write_meta_file() {
@@ -555,6 +725,7 @@ build_task_prompt() {
      - 风险、边界与改进建议
 
 要求：
+- 研究范围只限代码、脚本、配置、测试以及必要实现上下文，不要把 README、docs、Docs、markdown 等文档作为研究目标。
 - 仅修改该研究文档及其必要目录。
 - 不要修改 checklist / todo 文件。
 - 不要执行 git commit / git push。
@@ -582,6 +753,7 @@ PROMPT
      - 风险、边界与改进建议
 
 要求：
+- 研究范围只限代码、脚本、配置、测试以及必要实现上下文，不要把 README、docs、Docs、markdown 等文档作为研究目标。
 - 仅修改该研究文档及其必要目录。
 - 不要修改 checklist / todo 文件。
 - 不要执行 git commit / git push。
@@ -614,6 +786,7 @@ ${batch_items}
    - 风险、边界与改进建议
 
 要求：
+- 研究范围只限代码、脚本、配置、测试以及必要实现上下文，不要把 README、docs、Docs、markdown 等文档作为研究目标。
 - 仅修改本批次对应的研究文档及其必要目录。
 - 不要修改 checklist / todo 文件。
 - 不要执行 git commit / git push。
@@ -666,6 +839,49 @@ mark_claimed_items_done() {
   mv "$tmp_file" "$CHECKLIST_FILE"
 }
 
+verify_claims_marked_done() {
+  local claims_file="$1"
+  local unresolved_file rc missing
+
+  [[ -f "$CHECKLIST_FILE" ]] || return 1
+  unresolved_file="$(mktemp "$LOG_DIR/checklist-verify.${PROJECT}.XXXXXX.list")"
+
+  awk -v key_file="$claims_file" '
+    BEGIN {
+      while ((getline k < key_file) > 0) {
+        if (k != "") wanted[k] = 1
+      }
+      close(key_file)
+    }
+    {
+      if (match($0, /^- \[([ xX])\] \[(DIR|FILE)\] (.+)$/, m)) {
+        seen[m[2] ":" m[3]] = m[1]
+      }
+    }
+    END {
+      bad = 0
+      for (k in wanted) {
+        if (!(k in seen) || seen[k] !~ /[xX]/) {
+          print k
+          bad = 1
+        }
+      }
+      exit bad
+    }
+  ' "$CHECKLIST_FILE" > "$unresolved_file"
+  rc=$?
+
+  if [[ "$rc" -ne 0 ]]; then
+    missing="$(paste -sd ',' "$unresolved_file" || true)"
+    log "error: checklist reconciliation missed completed research items: ${missing}"
+    rm -f "$unresolved_file"
+    return 1
+  fi
+
+  rm -f "$unresolved_file"
+  return 0
+}
+
 commit_outputs_with_lock() {
   local items_file="$1"
   local todo_file="$2"
@@ -704,7 +920,7 @@ apply_success_updates_with_lock() {
   local claims_file="$1"
   local items_file="$2"
   local meta_file="$3"
-  local todo_out pending_total
+  local todo_out pending_total auto_done
 
   # shellcheck disable=SC1090
   source "$meta_file"
@@ -724,8 +940,26 @@ apply_success_updates_with_lock() {
     return 1
   fi
 
+  # Reconcile all non-empty report files back into checklist marks.
+  # This guards against checklist resets that would otherwise cause duplicate research.
+  auto_done="$(reconcile_checklist_with_existing_reports)"
+  if [[ "$auto_done" =~ ^[0-9]+$ ]] && (( auto_done > 0 )); then
+    log "auto-reconciled checklist from existing reports in apply_success: count=${auto_done}"
+  fi
+
   todo_out="$(bash .ops/generate_daily_research_todo.sh 2>>"$LOG_FILE" | tail -n 1 || true)"
   log "today_todo=${todo_out}"
+  if [[ -z "$todo_out" || ! -s "$todo_out" ]]; then
+    log "error: failed to refresh daily todo after successful research batch"
+    flock -u 8 || true
+    exec 8>&-
+    return 1
+  fi
+  if ! verify_claims_marked_done "$claims_file"; then
+    flock -u 8 || true
+    exec 8>&-
+    return 1
+  fi
 
   commit_outputs_with_lock "$items_file" "$todo_out" "$COMMIT_TITLE" "$TARGET_DESC"
 
@@ -745,6 +979,8 @@ apply_success_updates_with_lock() {
 }
 
 refresh_checklist_with_lock() {
+  local auto_done todo_out
+
   exec 8>"$WRITE_LOCK_FILE"
   flock -x 8
   if ! bash .ops/generate_research_blueprint_checklist.sh >> "$LOG_FILE" 2>&1; then
@@ -752,6 +988,14 @@ refresh_checklist_with_lock() {
     exec 8>&-
     return 1
   fi
+
+  auto_done="$(reconcile_checklist_with_existing_reports)"
+  if [[ "$auto_done" =~ ^[0-9]+$ ]] && (( auto_done > 0 )); then
+    log "auto-reconciled checklist from existing reports: count=${auto_done}"
+    todo_out="$(bash .ops/generate_daily_research_todo.sh 2>>"$LOG_FILE" | tail -n 1 || true)"
+    log "today_todo=${todo_out}"
+  fi
+
   flock -u 8 || true
   exec 8>&-
   return 0
@@ -760,7 +1004,7 @@ refresh_checklist_with_lock() {
 run_worker_once() {
   local token="$1"
   local claims_file items_file meta_file prompt_file task
-  local run_rc apply_rc
+  local run_rc apply_rc done_count open_count total_count
 
   if ! refresh_checklist_with_lock; then
     set_state "failed_blueprint"
@@ -775,9 +1019,18 @@ run_worker_once() {
 
   if ! claim_next_task "$token" "$claims_file" "$items_file" "$meta_file"; then
     rm -f "$claims_file" "$items_file" "$meta_file" "$prompt_file"
-    set_state "completed"
     set_block 0
-    log "no available pending item for worker slot=${WORKER_SLOT}"
+    read -r done_count open_count total_count < <(read_research_checklist_counts)
+    if [[ "$open_count" == "0" ]]; then
+      set_state "completed"
+      log "no available pending item for worker slot=${WORKER_SLOT}; checklist complete done=${done_count} total=${total_count}"
+      if [[ "$AUTO_CLEANUP_ON_COMPLETE" == "1" && -x .ops/cleanup_research_cron.sh ]]; then
+        .ops/cleanup_research_cron.sh --execute >> "$LOG_FILE" 2>&1 || true
+      fi
+    else
+      set_state "idle_waiting"
+      log "no claimable pending item for worker slot=${WORKER_SLOT}; outstanding checklist items remain open=${open_count} done=${done_count} total=${total_count}"
+    fi
     return 2
   fi
 
@@ -912,6 +1165,10 @@ ensure_tmux_workers() {
 main() {
   cd "$REPO"
 
+  if [[ "$WORKER_MODE" != "1" ]]; then
+    record_research_batch_progress
+  fi
+
   if [[ "$TMUX_WRAP_ENABLED" == "1" && "$WORKER_MODE" != "1" ]]; then
     ensure_tmux_workers
     return 0
@@ -926,6 +1183,10 @@ main() {
   fi
 
   run_worker_loop || true
+
+  if [[ "$WORKER_MODE" != "1" ]]; then
+    record_research_batch_progress
+  fi
   return 0
 }
 

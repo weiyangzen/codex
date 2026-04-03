@@ -21,27 +21,27 @@ if [[ ! -f "$CHECKLIST_FILE" ]]; then
   bash "$REPO_ROOT/.ops/generate_research_blueprint_checklist.sh" >/dev/null
 fi
 
-pending_total="$( (rg -n '^- \[ \] \[(DIR|FILE)\] ' "$CHECKLIST_FILE" || true) | wc -l | tr -d ' ')"
-done_total="$( (rg -n '^- \[[xX]\] \[(DIR|FILE)\] ' "$CHECKLIST_FILE" || true) | wc -l | tr -d ' ')"
-dir_pending="$( (rg -n '^- \[ \] \[DIR\] ' "$CHECKLIST_FILE" || true) | wc -l | tr -d ' ')"
-file_pending="$( (rg -n '^- \[ \] \[FILE\] ' "$CHECKLIST_FILE" || true) | wc -l | tr -d ' ')"
+pending_total="$( (rg -n '^- \[ \] \[(DIR|FILE)\] ' "$CHECKLIST_FILE" || true) | wc -l | tr -d ' ' )"
+done_total="$( (rg -n '^- \[[xX]\] \[(DIR|FILE)\] ' "$CHECKLIST_FILE" || true) | wc -l | tr -d ' ' )"
+dir_pending="$( (rg -n '^- \[ \] \[DIR\] ' "$CHECKLIST_FILE" || true) | wc -l | tr -d ' ' )"
+file_pending="$( (rg -n '^- \[ \] \[FILE\] ' "$CHECKLIST_FILE" || true) | wc -l | tr -d ' ' )"
 
 {
   echo "# Research TODOs ${DATE_TAG}"
   echo
   echo "Project: \`$(basename "$REPO_ROOT")\`"
   echo "Generated at: $(date '+%F %T %z')"
-  echo "Source: \`Docs/researches/blueprint_checklist.md\`"
+  echo "Source: \`Docs/researches/blueprint_checklist.md\` (code-only scope)"
   echo
   echo "## Snapshot"
-  echo "- Done: ${done_total}"
-  echo "- Pending: ${pending_total}"
-  echo "- Pending Dirs: ${dir_pending}"
-  echo "- Pending Files: ${file_pending}"
+  echo "- Done Code Items: ${done_total}"
+  echo "- Pending Code Items: ${pending_total}"
+  echo "- Pending Code Dirs: ${dir_pending}"
+  echo "- Pending Code Files: ${file_pending}"
   echo
   echo "## Pending Items"
   if [[ "$pending_total" == "0" ]]; then
-    echo "- [x] No pending research items."
+    echo "- [x] No pending code research items."
   else
     rg '^- \[ \] \[(DIR|FILE)\] ' "$CHECKLIST_FILE"
   fi
